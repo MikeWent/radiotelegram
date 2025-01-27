@@ -30,10 +30,10 @@ Components:
 
 | Jack             | Contact Points |
 |------------------|----------------|
-| 3.5mm Baofeng    | Tip, Ring      |
-| 2.5mm Baofeng    | Tip, Sleeve    |
-| 3.5mm Microphone | Tip, Sleeve    |
-| 3.5mm Headphones | Tip, Sleeve    |
+| 3.5mm Baofeng    | Sleeve, Ring   |
+| 2.5mm Baofeng    | Sleeve, Tip    |
+| 3.5mm Microphone | Sleeve, Tip    |
+| 3.5mm Headphones | Sleeve, Tip    |
 
 1. find a datasheet for your ethernet transformer
 2. select two pairs as shown on the schematics
