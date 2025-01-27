@@ -1,6 +1,7 @@
 # radiotelegram
 
 Telegram voice messages <> Baofeng radio RX/TX two-way bridge (half-duplex).
+![logo](schematics/logo.jpg)
 
 ## description
 `radiotelegram` is a software-hardware project allowing you to to communicate with peers in Telegram chat using your handheld radio (walkie-talkie).
@@ -8,8 +9,8 @@ Telegram voice messages <> Baofeng radio RX/TX two-way bridge (half-duplex).
 Hardware requirements:
 - UR-5V Baofeng handheld radio (or compatible)
 - PC audio adapter (see below)
-## hardware
 
+## hardware
 In case of UV-5R you will need a special adapter to connect your radio. You can either:
 - buy [APRS K1 PRO](https://baofengtech.com/product/aprs-k1-pro/) 
 - diy adapter yourself (easy, see below)
