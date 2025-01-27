@@ -40,7 +40,7 @@ Components:
 
 ### python3.13, ffmpeg, ffplay
 ```
-sudo apt install ffmpeg ffplay python3.13-venv
+sudo apt install ffmpeg python3.13-venv
 ```
 
 `pyaudioop` was disconutinued in python3.13 so audioop-lts package is used.
