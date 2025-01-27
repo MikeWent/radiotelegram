@@ -1,0 +1,6 @@
+pyaudio
+aiogram
+numpy
+audioop-lts
+sounddevice
+python-dotenv
