@@ -61,5 +61,13 @@ sudo apt install ffmpeg python3.13-venv
 
     python3 ./radiotelegram/main.py
 
+## tuning (required)
+
+1. put baofeng into VOX mode (1/10).
+2. adjust main volume knob so that audio doesn't clip (<100% volume).
+3. adjust pc audio output volume so there is no voice distortion on the receiving end.
+
+> less is more. do NOT use full volume.
+
 # license
 MIT
