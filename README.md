@@ -28,9 +28,18 @@ Components:
 ![example view of an ethernet transformer](schematics/ethernet-transformers.png)
 ![schematics](schematics/transformers-schematics.jpg)
 
+| Jack             | Contact Points |
+|------------------|----------------|
+| 3.5mm Baofeng    | Tip, Ring      |
+| 2.5mm Baofeng    | Tip, Sleeve    |
+| 3.5mm Microphone | Tip, Sleeve    |
+| 3.5mm Headphones | Tip, Sleeve    |
+
 1. find a datasheet for your ethernet transformer
 2. select two pairs as shown on the schematics
-3. solder and connect, that's it
+3. cut cables, solder wires, that's it
+4. polarity is not that crucial, for voice it's ok both ways.
+
 
 ## software
 
