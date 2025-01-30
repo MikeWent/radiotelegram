@@ -3,6 +3,7 @@ import datetime
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -205,6 +206,9 @@ class RxListenWorker(Worker):
                 command, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
             )
 
+            while not (os.path.exists(trimmed_filepath)):
+                time.sleep(0.1)
+            
             # Replace original file with trimmed file
             os.replace(trimmed_filepath, self.recording_filepath)
 
