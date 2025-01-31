@@ -59,7 +59,7 @@ class TxPlayWorker(Worker):
                     "-f",
                     "lavfi",
                     "-i",
-                    "sine=frequency=5555:duration=0.5",
+                    "sine=frequency=5555:duration=1",
                     stdout=devnull,
                     stderr=devnull,
                 )
