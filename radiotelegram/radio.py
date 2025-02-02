@@ -136,7 +136,7 @@ class RxListenWorker(Worker):
         )
         sd.wait()
         self.threshold = (
-            np.mean(np.abs(audio)) * 5
+            np.mean(np.abs(audio)) * 3
         )  # Set threshold slightly above ambient noise
         self.logger.info(f"Calibrated silence threshold: {self.threshold}")
 
