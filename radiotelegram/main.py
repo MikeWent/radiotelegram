@@ -4,9 +4,8 @@ import os
 import signal
 
 from aiogram import Bot, Dispatcher
-from dotenv import load_dotenv
-
 from bus import MessageBus
+from dotenv import load_dotenv
 from radio import RxListenWorker, TxPlayWorker
 from telegram import (
     SendChatActionWorker,
@@ -24,8 +23,8 @@ async def main():
     load_dotenv()
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-    TOPIC_ID = int(os.getenv("TELEGRAM_TOPIC_ID", "0"))
-    assert TELEGRAM_BOT_TOKEN and CHAT_ID and TOPIC_ID
+    TOPIC_ID = int(os.getenv("TELEGRAM_TOPIC_ID", "0")) or None
+    assert TELEGRAM_BOT_TOKEN and CHAT_ID
 
     bus = MessageBus()
     bot = Bot(token=TELEGRAM_BOT_TOKEN)

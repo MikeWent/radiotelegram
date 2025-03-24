@@ -3,14 +3,12 @@ import os
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import FSInputFile
-
-from bus import (
-    MessageBus,
+from bus import MessageBus, Worker
+from events import (
     RxRecordingCompleteEvent,
     RxRecordingEndedEvent,
     RxRecordingStartedEvent,
     TelegramVoiceMessageDownloadedEvent,
-    Worker,
 )
 
 
@@ -57,7 +55,7 @@ class SendChatActionWorker(Worker):
 
 class TelegramMessageFetchWorker(Worker):
     def __init__(
-        self, bus: MessageBus, bot: Bot, dp: Dispatcher, chat_id: str, topic_id: int
+        self, bus: MessageBus, bot: Bot, dp: Dispatcher, chat_id: str, topic_id: int | None
     ):
         super().__init__(bus)
         self.bot = bot
@@ -85,6 +83,7 @@ class TelegramMessageFetchWorker(Worker):
             )
 
 
+# VoiceMessageUploadWorker with retry logic
 class VoiceMessageUploadWorker(Worker):
     def __init__(self, bus: MessageBus, bot: Bot, chat_id: str, topic_id: int):
         super().__init__(bus)
@@ -94,20 +93,31 @@ class VoiceMessageUploadWorker(Worker):
         self.bus.subscribe(RxRecordingCompleteEvent, self.queue_event)
 
     async def handle_event(self, event: RxRecordingCompleteEvent):
-        """Uploads recorded voice messages to Telegram."""
+        """Uploads recorded voice messages to Telegram with fault-tolerance.
+        Retries indefinitely if a timeout or any exception occurs.
+        """
         self.logger.info(f"Uploading voice message: {event.filepath}")
-        try:
-            with open(event.filepath, "rb") as voice_file:
-                await self.bot.send_voice(
-                    chat_id=self.chat_id,
-                    voice=FSInputFile(path=event.filepath),
-                    message_thread_id=self.topic_id,
-                    request_timeout=5,
+        retry_delay = 5  # seconds to wait before retrying
+        while True:
+            try:
+                with open(event.filepath, "rb") as voice_file:
+                    # FSInputFile encapsulates the file for uploading
+                    await self.bot.send_voice(
+                        chat_id=self.chat_id,
+                        voice=FSInputFile(path=event.filepath),
+                        message_thread_id=self.topic_id,
+                        request_timeout=5,
+                    )
+                self.logger.info(f"Successfully uploaded {event.filepath}")
+                os.remove(event.filepath)  # Delete the file after a successful upload
+                break  # Exit the loop on success
+            except FileNotFoundError:
+                break
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to upload {event.filepath}: {e}. Retrying in {retry_delay} seconds..."
                 )
-            self.logger.info(f"Successfully uploaded {event.filepath}")
-            os.remove(event.filepath)  # Delete the file after upload
-        except Exception as e:
-            self.logger.error(f"Failed to upload {event.filepath}: {e}")
+                await asyncio.sleep(retry_delay)
 
     async def start(self):
         asyncio.create_task(self.process_queue())

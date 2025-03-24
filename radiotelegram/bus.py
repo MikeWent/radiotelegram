@@ -2,7 +2,6 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass
 from typing import Callable, Deque, Dict, List, Type
 
 
@@ -49,36 +48,3 @@ class Worker(ABC):
     @abstractmethod
     async def start(self):
         pass
-
-
-# Recording
-@dataclass
-class RxRecordingStartedEvent:
-    pass
-
-
-@dataclass
-class RxRecordingEndedEvent:
-    pass
-
-
-@dataclass
-class RxRecordingCompleteEvent:
-    filepath: str
-
-
-# Playback
-@dataclass
-class TxMessagePlaybackStartedEvent:
-    pass
-
-
-@dataclass
-class TxMessagePlaybackEndedEvent:
-    pass
-
-
-# Telegram
-@dataclass
-class TelegramVoiceMessageDownloadedEvent:
-    filepath: str

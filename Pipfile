@@ -12,9 +12,9 @@ sounddevice = "*"
 python-dotenv = "*"
 
 [dev-packages]
+mypy = "*"
 black = "*"
 isort = "*"
-mypy = "*"
 
 [requires]
 python_version = "3.13"
