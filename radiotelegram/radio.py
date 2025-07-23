@@ -274,19 +274,27 @@ class VoiceDetector:
         self.sample_rate = sample_rate
         self.spectral_analyzer = SpectralAnalyzer(sample_rate)
 
-        # Voice detection thresholds (tuned based on good voice vs noise samples)
-        self.min_voice_energy_ratio = 0.10  # Minimum voice band energy ratio (lowered)
-        self.min_voice_quality_score = 0.02  # Minimum voice quality (lowered)
-        self.min_spectral_centroid = 300  # Hz - minimum for voice (lowered)
-        self.max_spectral_centroid = 2500  # Hz - maximum for voice (raised)
+        # Voice detection thresholds (optimized for weak signal detection)
+        self.min_voice_energy_ratio = (
+            0.05  # Less important - noise can have high ratios too
+        )
+        self.min_voice_quality_score = 0.015  # Minimum voice quality
+        self.min_spectral_centroid = 300  # Hz - minimum for voice
+        self.max_spectral_centroid = 2500  # Hz - maximum for voice
         self.min_analysis_duration = 0.5  # Minimum seconds to analyze
         self.voice_consistency_threshold = (
-            0.35  # Portion of chunks that must pass voice tests (lowered)
+            0.04  # Ultra-low threshold for very weak signals
         )
 
-        # Energy and dynamics thresholds
-        self.min_energy_db = -60.0  # Minimum energy level (lowered for weak signals)
-        self.min_dynamic_range_db = 6.0  # Minimum dynamic range for voice (lowered)
+        # Key discriminator: spectral variability (voice has higher variability than noise)
+        self.min_spectral_variability = (
+            0.5  # Voice should have significant spectral changes
+        )
+        self.max_spectral_variability = 2.0  # But not too chaotic
+
+        # Energy and dynamics thresholds - relaxed for weak signals
+        self.min_energy_db = -200.0  # Effectively disabled for weak signal detection
+        self.min_dynamic_range_db = 3.0  # Reduced minimum dynamic range
 
     def analyze_recording(self, filepath: str) -> Tuple[bool, dict]:
         """
@@ -442,13 +450,15 @@ class VoiceDetector:
                 sustained_energy_chunks / total_chunks if total_chunks > 0 else 0
             )
             min_sustained_energy_ratio = (
-                0.4  # At least 40% of chunks should have sustained energy
+                0.05  # Very low threshold for weak signals (was 0.35)
             )
 
             # Enhanced voice detection criteria
-            # Voice should have some spectral variability (not completely stable like pure noise)
-            min_spectral_variability = (
-                0.01  # Minimum variability to distinguish from pure tones/static
+            # Voice should have significant spectral variability (not like pure noise or tones)
+            spectral_variability_ok = (
+                self.min_spectral_variability
+                <= spectral_stability
+                <= self.max_spectral_variability
             )
 
             # Final voice detection decision with enhanced criteria
@@ -461,8 +471,7 @@ class VoiceDetector:
                 <= avg_centroid
                 <= self.max_spectral_centroid
                 and voice_consistency > self.voice_consistency_threshold
-                and spectral_stability
-                > min_spectral_variability  # Reject pure tones/static
+                and spectral_variability_ok  # Key discriminator: voice has moderate spectral changes
                 and sustained_energy_ratio
                 > min_sustained_energy_ratio  # Reject clicks/pops
             )
