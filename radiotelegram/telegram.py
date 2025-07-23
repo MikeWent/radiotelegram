@@ -77,8 +77,8 @@ class TelegramMessageFetchWorker(Worker):
         )
         async def handle_voice_message(message: types.Message):
             filename = f"voice_{message.message_id}.ogg"
-            filepath = os.path.join("downloads", filename)
-            os.makedirs("downloads", exist_ok=True)
+            filepath = os.path.join("/tmp", filename)
+            os.makedirs("/tmp", exist_ok=True)
             await self.bot.download(
                 file=message.voice.file_id, destination=filepath, timeout=10  # type: ignore
             )

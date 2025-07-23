@@ -769,10 +769,10 @@ class EnhancedRxListenWorker(Worker):
         if self.recording:
             return
 
-        os.makedirs("recordings", exist_ok=True)
+        os.makedirs("/tmp", exist_ok=True)
         timestamp = datetime.datetime.now().timestamp()
         filename = f"recording_{timestamp:.3f}.wav"  # Use WAV for better processing
-        self.recording_filepath = os.path.join("recordings", filename)
+        self.recording_filepath = os.path.join("/tmp", filename)
         self.recording_start_time = datetime.datetime.now()
 
         # Record raw audio first, then process
