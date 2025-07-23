@@ -6,7 +6,6 @@ import time
 from typing import Optional, Tuple
 
 import numpy as np
-import sounddevice as sd
 from bus import MessageBus, Worker
 from events import (
     RxNoiseFloorStatsEvent,
@@ -720,10 +719,15 @@ class EnhancedTxPlayWorker(Worker):
 class EnhancedRxListenWorker(Worker):
     """Enhanced receiver worker with advanced audio processing."""
 
-    def __init__(self, bus: MessageBus, sample_rate=48000, chunk_size=512):
+    def __init__(
+        self, bus: MessageBus, sample_rate=48000, chunk_size=512, audio_device="pulse"
+    ):
         super().__init__(bus)
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
+        self.audio_device = (
+            audio_device  # Default to pulse (PipeWire/PulseAudio compatible)
+        )
 
         # Recording parameters
         self.silence_duration = 2.0  # Seconds to wait before stopping recording
@@ -753,6 +757,9 @@ class EnhancedRxListenWorker(Worker):
         self.bus.subscribe(TxMessagePlaybackStartedEvent, self.on_playback_started)
         self.bus.subscribe(TxMessagePlaybackEndedEvent, self.on_playback_finished)
 
+        # Test audio device availability at startup
+        self._test_audio_device()
+
     async def on_playback_started(self, event: TxMessagePlaybackStartedEvent):
         """Disable listening during playback to prevent feedback."""
         self.enabled = False
@@ -763,6 +770,292 @@ class EnhancedRxListenWorker(Worker):
     async def on_playback_finished(self, event: TxMessagePlaybackEndedEvent):
         """Re-enable listening after playback ends."""
         self.enabled = True
+
+    def _test_audio_device(self):
+        """Test audio device availability and log diagnostics."""
+        try:
+            # First check if PipeWire is running
+            self._check_pipewire_status()
+
+            # Test if we can list audio devices
+            result = subprocess.run(
+                ["ffmpeg", "-f", "alsa", "-list_devices", "true", "-i", "dummy"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.stderr:
+                self.logger.debug(f"Available ALSA devices:\n{result.stderr}")
+
+            # Extract available input devices from the output
+            available_devices = self._parse_alsa_devices(result.stderr)
+            self.logger.info(f"Detected ALSA input devices: {available_devices}")
+
+            # Test the configured device first
+            if self._test_device(self.audio_device):
+                self.logger.info(f"Audio device '{self.audio_device}' is working")
+                return
+
+            # If default device fails, try other common device names
+            fallback_devices = [
+                "pulse",  # PulseAudio/PipeWire compatibility layer (try first)
+                "pipewire",  # Direct PipeWire access
+                "hw:0,0",
+                "plughw:0,0",
+                "hw:1,0",
+                "plughw:1,0",
+                "hw:2,0",
+                "plughw:2,0",  # Try more hardware devices
+                "hw:0",
+                "plughw:0",  # Simplified hardware references
+                "hw:1",
+                "plughw:1",
+            ]
+
+            for device in fallback_devices:
+                if device != self.audio_device:  # Don't test the same device twice
+                    self.logger.info(f"Testing fallback audio device: {device}")
+                    if self._test_device(device):
+                        self.logger.info(f"Switching to working audio device: {device}")
+                        self.audio_device = device
+                        return
+
+            # If no device works, log the problem and provide diagnostics
+            self._log_troubleshooting_info()
+            self._run_audio_diagnostics()
+
+        except subprocess.TimeoutExpired:
+            self.logger.error("Audio device test timed out")
+        except Exception as e:
+            self.logger.error(f"Audio device test error: {e}")
+
+    def _run_audio_diagnostics(self):
+        """Run comprehensive audio diagnostics to help troubleshoot issues."""
+        self.logger.info("Running audio diagnostics...")
+
+        try:
+            # Check what processes are using audio
+            lsof_result = subprocess.run(
+                ["sudo", "lsof", "/dev/snd/*"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if lsof_result.returncode == 0 and lsof_result.stdout:
+                self.logger.info(
+                    f"Processes using audio devices:\n{lsof_result.stdout}"
+                )
+            else:
+                self.logger.info(
+                    "No processes found using audio devices (or lsof failed)"
+                )
+
+        except subprocess.TimeoutExpired:
+            self.logger.warning("Audio diagnostics lsof command timed out")
+        except Exception as e:
+            self.logger.debug(f"Could not run lsof diagnostics: {e}")
+
+        try:
+            # List available ALSA devices
+            arecord_result = subprocess.run(
+                ["arecord", "-l"], capture_output=True, text=True, timeout=10
+            )
+            if arecord_result.returncode == 0:
+                self.logger.info(f"ALSA recording devices:\n{arecord_result.stdout}")
+            else:
+                self.logger.warning(f"arecord -l failed: {arecord_result.stderr}")
+
+        except subprocess.TimeoutExpired:
+            self.logger.warning("arecord command timed out")
+        except Exception as e:
+            self.logger.debug(f"Could not run arecord diagnostics: {e}")
+
+        try:
+            # Check user groups
+            groups_result = subprocess.run(
+                ["groups"], capture_output=True, text=True, timeout=5
+            )
+            if groups_result.returncode == 0:
+                groups = groups_result.stdout.strip()
+                self.logger.info(f"User groups: {groups}")
+                if "audio" not in groups:
+                    self.logger.warning(
+                        "User is not in 'audio' group - this may cause permission issues"
+                    )
+            else:
+                self.logger.debug("Could not check user groups")
+
+        except Exception as e:
+            self.logger.debug(f"Could not check user groups: {e}")
+
+        try:
+            # Check PipeWire services status
+            pipewire_status = subprocess.run(
+                ["systemctl", "--user", "is-active", "pipewire"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            pulse_status = subprocess.run(
+                ["systemctl", "--user", "is-active", "pipewire-pulse"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+
+            self.logger.info(
+                f"PipeWire service status: {pipewire_status.stdout.strip()}"
+            )
+            self.logger.info(
+                f"PipeWire-Pulse service status: {pulse_status.stdout.strip()}"
+            )
+
+        except Exception as e:
+            self.logger.debug(f"Could not check PipeWire service status: {e}")
+
+    def _check_pipewire_status(self):
+        """Check if PipeWire is running and log status."""
+        try:
+            # Check if PipeWire daemon is running
+            pipewire_result = subprocess.run(
+                ["pgrep", "-f", "pipewire"], capture_output=True, text=True
+            )
+
+            if pipewire_result.returncode == 0:
+                self.logger.info("PipeWire daemon is running")
+
+                # Try to get PipeWire-pulse status
+                try:
+                    pulse_result = subprocess.run(
+                        ["pgrep", "-f", "pipewire-pulse"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if pulse_result.returncode == 0:
+                        self.logger.info(
+                            "PipeWire-PulseAudio compatibility layer is running"
+                        )
+                except:
+                    pass
+
+            else:
+                self.logger.warning(
+                    "PipeWire daemon not detected, checking for PulseAudio..."
+                )
+
+                # Check for PulseAudio
+                pulse_result = subprocess.run(
+                    ["pgrep", "-f", "pulseaudio"], capture_output=True, text=True
+                )
+
+                if pulse_result.returncode == 0:
+                    self.logger.info("PulseAudio daemon is running")
+                else:
+                    self.logger.warning("Neither PipeWire nor PulseAudio detected")
+
+        except Exception as e:
+            self.logger.debug(f"Could not check PipeWire/PulseAudio status: {e}")
+
+    def _log_troubleshooting_info(self):
+        """Log comprehensive troubleshooting information."""
+        self.logger.error("No working audio input device found!")
+        self.logger.error("PipeWire/PulseAudio troubleshooting:")
+        self.logger.error(
+            "1. Check if PipeWire is running: 'systemctl --user status pipewire'"
+        )
+        self.logger.error(
+            "2. Start PipeWire: 'systemctl --user start pipewire pipewire-pulse'"
+        )
+        self.logger.error("3. Check what's using audio: 'sudo lsof /dev/snd/*'")
+        self.logger.error(
+            "4. Stop other audio applications (browsers, media players, etc.)"
+        )
+        self.logger.error(
+            "5. Restart audio services: 'systemctl --user restart pipewire'"
+        )
+        self.logger.error("6. Check if you're in audio group: 'groups $USER'")
+        self.logger.error("7. Verify hardware: 'arecord -l' and 'aplay -l'")
+        self.logger.error("8. For ALSA fallback: 'sudo alsa force-reload'")
+        self.logger.error("9. Check for exclusive mode: kill other audio processes")
+
+    def _parse_alsa_devices(self, stderr_output):
+        """Parse FFmpeg ALSA device list output to extract available devices."""
+        devices = []
+        if not stderr_output:
+            return devices
+
+        lines = stderr_output.split("\n")
+        for line in lines:
+            # Look for input device lines like "[0] card 0, device 0: ..."
+            if "Input" in line and "card" in line:
+                # Extract device identifier
+                if "[" in line and "]" in line:
+                    device_info = line.split("]", 1)[1].strip()
+                    devices.append(device_info)
+        return devices
+
+    def _test_device(self, device):
+        """Test if a specific audio device works by recording a short sample."""
+        try:
+            test_file = "/tmp/audio_test.wav"
+            test_command = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "alsa",
+                "-i",
+                device,
+                "-t",
+                "0.1",  # Record for 0.1 seconds
+                "-ar",
+                str(self.sample_rate),
+                "-ac",
+                "1",
+                "-c:a",
+                "pcm_s16le",
+                test_file,
+            ]
+
+            test_result = subprocess.run(
+                test_command, capture_output=True, text=True, timeout=5
+            )
+
+            if test_result.returncode == 0 and os.path.exists(test_file):
+                file_size = os.path.getsize(test_file)
+                self.logger.debug(
+                    f"Device '{device}' test successful - created {file_size} byte test file"
+                )
+                os.remove(test_file)
+                return True
+            else:
+                # Parse the error to provide better diagnostics
+                error_msg = test_result.stderr.lower()
+                if "device or resource busy" in error_msg:
+                    self.logger.warning(
+                        f"Device '{device}' is busy (being used by another process)"
+                    )
+                elif "no such file or directory" in error_msg:
+                    self.logger.debug(f"Device '{device}' does not exist")
+                elif "input/output error" in error_msg:
+                    self.logger.debug(
+                        f"Device '{device}' has I/O error (may be busy or misconfigured)"
+                    )
+                elif "permission denied" in error_msg:
+                    self.logger.warning(
+                        f"Device '{device}' permission denied (check audio group membership)"
+                    )
+                else:
+                    self.logger.debug(
+                        f"Device '{device}' test failed: {test_result.stderr.strip()}"
+                    )
+                return False
+
+        except subprocess.TimeoutExpired:
+            self.logger.debug(f"Device '{device}' test timed out")
+            return False
+        except Exception as e:
+            self.logger.debug(f"Device '{device}' test error: {e}")
+            return False
 
     def start_recording(self):
         """Start recording with enhanced processing."""
@@ -782,7 +1075,7 @@ class EnhancedRxListenWorker(Worker):
             "-f",
             "alsa",
             "-i",
-            "default",
+            self.audio_device,  # Use the tested/detected audio device
             "-ac",
             "1",
             "-ar",
@@ -792,10 +1085,26 @@ class EnhancedRxListenWorker(Worker):
             self.recording_filepath,
         ]
 
+        self.logger.debug(
+            f"Starting FFmpeg recording with command: {' '.join(command)}"
+        )
+
         try:
             self.process = subprocess.Popen(
-                command, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
+                command, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True
             )
+
+            # Give FFmpeg a moment to initialize
+            time.sleep(0.1)
+
+            # Check if process is still running (didn't fail immediately)
+            if self.process.poll() is not None:
+                # Process has already terminated
+                _, stderr = self.process.communicate()
+                self.logger.error(f"FFmpeg failed to start recording: {stderr}")
+                self.recording = False
+                return
+
             self.recording = True
             self.silence_counter = 0
             asyncio.run(self.bus.publish(RxRecordingStartedEvent()))
@@ -817,15 +1126,47 @@ class EnhancedRxListenWorker(Worker):
         if self.process:
             try:
                 self.process.terminate()
-                self.process.wait(timeout=5.0)
+                _, stderr = self.process.communicate(timeout=5.0)
+                if stderr and self.process.returncode != 0:
+                    self.logger.error(f"FFmpeg recording error: {stderr}")
             except subprocess.TimeoutExpired:
+                self.logger.warning("FFmpeg process termination timeout, force killing")
                 self.process.kill()
-                self.process.wait()
+                try:
+                    _, stderr = self.process.communicate(timeout=2.0)
+                    if stderr:
+                        self.logger.error(f"FFmpeg recording error (killed): {stderr}")
+                except subprocess.TimeoutExpired:
+                    self.logger.error("FFmpeg process could not be killed")
             finally:
                 self.process = None
 
         self.recording = False
         asyncio.run(self.bus.publish(RxRecordingEndedEvent()))
+
+        # Give FFmpeg a moment to finalize the file
+        time.sleep(0.1)
+
+        # Check if recording file actually exists
+        if not self.recording_filepath or not os.path.exists(self.recording_filepath):
+            self.logger.error(
+                f"Recording file does not exist: {self.recording_filepath}"
+            )
+            return
+
+        # Check file size to ensure we have actual audio data
+        try:
+            file_size = os.path.getsize(self.recording_filepath)
+            self.logger.debug(f"Recording file size: {file_size} bytes")
+            if file_size < 1024:  # Less than 1KB is probably an empty or corrupt file
+                self.logger.warning(
+                    f"Recording file is too small ({file_size} bytes), likely corrupt"
+                )
+                os.remove(self.recording_filepath)
+                return
+        except OSError as e:
+            self.logger.error(f"Cannot access recording file: {e}")
+            return
 
         # Calculate trimmed duration
         trimmed_duration = max(0, recording_duration - self.silence_duration)
@@ -842,6 +1183,13 @@ class EnhancedRxListenWorker(Worker):
     def _process_recording(self, duration: float):
         """Apply advanced processing to recorded audio."""
         if not self.recording_filepath:
+            return
+
+        # Double-check that the recording file exists
+        if not os.path.exists(self.recording_filepath):
+            self.logger.error(
+                f"Recording file missing for processing: {self.recording_filepath}"
+            )
             return
 
         try:
@@ -941,78 +1289,181 @@ class EnhancedRxListenWorker(Worker):
                 os.remove(self.recording_filepath)
 
     def process_audio_stream(self):
-        """Enhanced audio stream processing with advanced squelch."""
-        self.logger.info("Starting enhanced audio stream processing")
+        """Enhanced audio stream processing with advanced squelch using FFmpeg streaming."""
+        self.logger.info("Starting enhanced audio stream processing with FFmpeg")
 
+        max_retries = 3
+        retry_delay = 5.0  # seconds
+
+        for attempt in range(max_retries):
+            if not self.enabled:
+                self.logger.info("Audio processing disabled, stopping")
+                return
+
+            self.logger.info(
+                f"Audio stream attempt {attempt + 1}/{max_retries} with device: {self.audio_device}"
+            )
+
+            if self._process_audio_stream_once():
+                # Successful run, don't retry unless it fails again
+                break
+            else:
+                # Failed, try to find a different device for next attempt
+                if attempt < max_retries - 1:
+                    self.logger.warning(
+                        f"Audio stream failed, retrying in {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+
+                    # Try to find a working device for next attempt
+                    self._test_audio_device()
+                else:
+                    self.logger.error("All audio stream attempts failed")
+
+    def _process_audio_stream_once(self) -> bool:
+        """Single attempt at audio stream processing. Returns True if successful."""
+        # Use FFmpeg for streaming instead of PortAudio to avoid device conflicts
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-f",
+            "alsa",
+            "-i",
+            self.audio_device,
+            "-ac",
+            "1",  # Mono
+            "-ar",
+            str(self.sample_rate),  # Sample rate
+            "-f",
+            "s16le",  # 16-bit little-endian PCM
+            "-",  # Output to stdout
+        ]
+
+        process = None
         try:
-            with sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="int16",
-                blocksize=self.chunk_size,
-            ) as stream:
+            # Start FFmpeg process for continuous audio streaming
+            process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,  # Unbuffered
+            )
 
-                while True:
-                    if not self.enabled:
-                        time.sleep(0.01)
+            if not process.stdout:
+                self.logger.error("Failed to get FFmpeg stdout stream")
+                return False
+
+            self.logger.info(
+                f"FFmpeg audio streaming started with device: {self.audio_device}"
+            )
+
+            # Read audio data in chunks
+            bytes_per_sample = 2  # 16-bit = 2 bytes
+            chunk_bytes = self.chunk_size * bytes_per_sample
+
+            # Track successful operation
+            successful_chunks = 0
+            min_successful_chunks = (
+                10  # Must process at least 10 chunks to be considered successful
+            )
+
+            while True:
+                if not self.enabled:
+                    self.logger.info("Audio processing disabled, stopping stream")
+                    return successful_chunks >= min_successful_chunks
+
+                try:
+                    # Check if FFmpeg process is still running
+                    if process.poll() is not None:
+                        # Process has terminated, try to get error info
+                        _, stderr = process.communicate()
+                        error_msg = stderr.decode() if stderr else "Unknown error"
+                        self.logger.error(f"FFmpeg process terminated: {error_msg}")
+                        return successful_chunks >= min_successful_chunks
+
+                    # Read chunk from FFmpeg stdout
+                    raw_data = process.stdout.read(chunk_bytes)
+
+                    if not raw_data:
+                        # No data available, FFmpeg might have stopped
+                        self.logger.warning("No audio data from FFmpeg")
+                        time.sleep(0.1)
                         continue
 
-                    try:
-                        data, overflowed = stream.read(self.chunk_size)
+                    if len(raw_data) < chunk_bytes:
+                        # Partial data, continue reading
+                        time.sleep(0.001)
+                        continue
 
-                        if overflowed:
-                            self.logger.warning("Audio input overflow detected")
+                    # Convert raw bytes to numpy array
+                    audio_chunk = np.frombuffer(raw_data, dtype=np.int16)
 
-                        # Flatten the data array
-                        audio_chunk = data.flatten()
+                    # Apply advanced squelch processing
+                    squelch_open, stats = self.squelch.process(audio_chunk)
 
-                        # Apply advanced squelch processing
-                        squelch_open, stats = self.squelch.process(audio_chunk)
+                    # Handle squelch state changes
+                    current_time = time.time()
 
-                        # Handle squelch state changes
-                        current_time = time.time()
-
-                        if squelch_open and not self.recording:
-                            # Squelch opened
-                            if self.squelch_open_time is None:
-                                self.squelch_open_time = current_time
-                            elif (
-                                current_time - self.squelch_open_time
-                            ) > self.min_squelch_open_duration:
-                                # Squelch has been open long enough to start recording
-                                self.start_recording()
-                                self.squelch_open_time = None
-
-                        elif not squelch_open:
-                            # Squelch closed
+                    if squelch_open and not self.recording:
+                        # Squelch opened
+                        if self.squelch_open_time is None:
+                            self.squelch_open_time = current_time
+                        elif (
+                            current_time - self.squelch_open_time
+                        ) > self.min_squelch_open_duration:
+                            # Squelch has been open long enough to start recording
+                            self.start_recording()
                             self.squelch_open_time = None
 
-                            if self.recording:
-                                self.silence_counter += 1
-                                chunks_for_silence = self.silence_duration * (
-                                    self.sample_rate / self.chunk_size
-                                )
+                    elif not squelch_open:
+                        # Squelch closed
+                        self.squelch_open_time = None
 
-                                if self.silence_counter >= chunks_for_silence:
-                                    self.stop_recording()
-                        else:
-                            # Squelch is open and recording
-                            self.silence_counter = 0
+                        if self.recording:
+                            self.silence_counter += 1
+                            chunks_for_silence = self.silence_duration * (
+                                self.sample_rate / self.chunk_size
+                            )
 
-                        # Publish statistics periodically
-                        if (
-                            current_time - self.last_stats_publish_time
-                            >= self.stats_interval
-                        ):
-                            asyncio.run(self._publish_enhanced_stats(stats))
-                            self.last_stats_publish_time = current_time
+                            if self.silence_counter >= chunks_for_silence:
+                                self.stop_recording()
+                    else:
+                        # Squelch is open and recording
+                        self.silence_counter = 0
 
-                    except Exception as e:
-                        self.logger.error(f"Error processing audio chunk: {e}")
-                        time.sleep(0.01)
+                    # Publish statistics periodically
+                    if (
+                        current_time - self.last_stats_publish_time
+                        >= self.stats_interval
+                    ):
+                        asyncio.run(self._publish_enhanced_stats(stats))
+                        self.last_stats_publish_time = current_time
+
+                    successful_chunks += 1
+
+                except Exception as e:
+                    self.logger.error(f"Error processing audio chunk: {e}")
+                    time.sleep(0.01)
 
         except Exception as e:
             self.logger.error(f"Fatal error in audio stream processing: {e}")
+            return False
+        finally:
+            # Clean up FFmpeg process
+            if process and process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.logger.warning("FFmpeg termination timeout, force killing")
+                    process.kill()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self.logger.error("Could not kill FFmpeg process")
+                except Exception as e:
+                    self.logger.error(f"Error terminating FFmpeg process: {e}")
+
+            self.logger.info("Audio stream processing stopped")
 
     async def _publish_enhanced_stats(self, stats: dict):
         """Publish enhanced statistics including spectral analysis."""

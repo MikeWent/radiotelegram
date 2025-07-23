@@ -24,13 +24,16 @@ async def main():
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
     TOPIC_ID = int(os.getenv("TELEGRAM_TOPIC_ID", "0")) or None
+    AUDIO_DEVICE = os.getenv(
+        "AUDIO_DEVICE", "pulse"
+    )  # Default to PipeWire/PulseAudio compatible device
     assert TELEGRAM_BOT_TOKEN and CHAT_ID
 
     bus = MessageBus()
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
 
-    audio_listener = EnhancedRxListenWorker(bus)
+    audio_listener = EnhancedRxListenWorker(bus, audio_device=AUDIO_DEVICE)
     audio_player = EnhancedTxPlayWorker(bus)
     message_fetcher = TelegramMessageFetchWorker(
         bus, bot, dp, chat_id=CHAT_ID, topic_id=TOPIC_ID
