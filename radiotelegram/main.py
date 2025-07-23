@@ -6,7 +6,7 @@ import signal
 from aiogram import Bot, Dispatcher
 from bus import MessageBus
 from dotenv import load_dotenv
-from radio import RxListenWorker, TxPlayWorker
+from radio import EnhancedRxListenWorker, EnhancedTxPlayWorker
 from telegram import (
     SendChatActionWorker,
     TelegramMessageFetchWorker,
@@ -30,8 +30,8 @@ async def main():
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
 
-    audio_listener = RxListenWorker(bus)
-    audio_player = TxPlayWorker(bus)
+    audio_listener = EnhancedRxListenWorker(bus)
+    audio_player = EnhancedTxPlayWorker(bus)
     message_fetcher = TelegramMessageFetchWorker(
         bus, bot, dp, chat_id=CHAT_ID, topic_id=TOPIC_ID
     )

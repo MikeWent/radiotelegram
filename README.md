@@ -1,12 +1,20 @@
 # radiotelegram
 
-Telegram voice messages <> Baofeng radio RX/TX two-way bridge (half-duplex).
+Telegram voice messages <> Baofeng radio RX/TX two-way bridge (half-duplex) with advanced audio processing.
 ![logo](schematics/logo.jpg)
 
 ## description
 `radiotelegram` is a software-hardware project allowing you to to communicate with peers in Telegram chat using your handheld radio (walkie-talkie).
  - RX is recorded and sent to Telegram chat (topic) as a voice message.
- - incoming chat voice messages are played into radio TX. 
+ - incoming chat voice messages are played into radio TX with enhanced audio processing.
+
+## enhanced audio processing features
+- **Advanced Squelch**: Multi-criteria signal detection with spectral analysis and adaptive noise floor
+- **Voice Detection**: Frequency domain analysis optimized for voice communications (300Hz-3.4kHz)  
+- **Radio-optimized Processing**: Pre-emphasis, bandpass filtering, and dynamic range compression
+- **Noise Reduction**: Spectral noise reduction with adaptive thresholds
+- **PTT Reliability**: Wake tone generation for consistent radio keying
+- **Quality Enhancement**: Loudness normalization and overmodulation prevention 
 
 
 ## hardware
@@ -71,3 +79,6 @@ sudo apt install ffmpeg python3.13-venv
 
 # license
 MIT
+
+# credits
+thx to claude sonnet 4 for comprehensive audio analysis and filter code generation.

@@ -55,7 +55,12 @@ class SendChatActionWorker(Worker):
 
 class TelegramMessageFetchWorker(Worker):
     def __init__(
-        self, bus: MessageBus, bot: Bot, dp: Dispatcher, chat_id: str, topic_id: int | None
+        self,
+        bus: MessageBus,
+        bot: Bot,
+        dp: Dispatcher,
+        chat_id: str,
+        topic_id: int | None,
     ):
         super().__init__(bus)
         self.bot = bot

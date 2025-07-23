@@ -1,6 +1,7 @@
 pyaudio
 aiogram
 numpy
+scipy
 audioop-lts; python_version >= "3.13"
 sounddevice
 python-dotenv
