@@ -56,12 +56,13 @@ Components:
 1. copy `.env.example` to `.env`
 2. edit file: fill bot token, group id and topic id (if present).
 
-### python3.13, ffmpeg, ffplay
+### dependencies
 ```
-sudo apt install ffmpeg python3.13-venv
+sudo apt install ffmpeg python3-venv portaudio19-dev python3-dev build-essential 
 ```
 
-`pyaudioop` was disconutinued in python3.13 so audioop-lts package is used.
+> Note:
+> `pyaudioop` was disconutinued in python3.13 so audioop-lts package is used.
 
     python3 -m venv ./venv
     source ./venv/bin/activate
