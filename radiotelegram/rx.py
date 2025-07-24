@@ -285,10 +285,8 @@ class VoiceDetector:
         self.spectral_analyzer = SpectralAnalyzer(sample_rate)
 
         # Voice detection thresholds (optimized for weak signal detection)
-        self.min_voice_energy_ratio = (
-            0.03  # Even more permissive for weak voice signals
-        )
-        self.min_voice_quality_score = 0.01  # Reduced for weak signals
+        self.min_voice_energy_ratio = 0.1  # Even more permissive for weak voice signals
+        self.min_voice_quality_score = 0.1  # Reduced for weak signals
         self.min_spectral_centroid = 250  # Hz - slightly lower for weak voices
         self.max_spectral_centroid = 2800  # Hz - slightly higher range
         self.min_analysis_duration = 0.5  # Minimum seconds to analyze
@@ -529,6 +527,10 @@ class EnhancedRxListenWorker(Worker):
         self.process = None
         self.silence_counter = 0
 
+        # Squelch state tracking - optimized for immediate response
+        self.squelch_open_time: Optional[float] = None
+        self.min_squelch_open_duration = 0.5
+
         # Pre-recording buffer to capture audio before squelch opens
         self.pre_record_duration = 0.5  # Seconds of audio to buffer before squelch
         self.pre_record_buffer = []  # Circular buffer for audio chunks
@@ -552,10 +554,6 @@ class EnhancedRxListenWorker(Worker):
         # Performance monitoring for latency debugging
         self.chunk_process_times = []
         self.max_process_time_samples = 100  # Keep last 100 samples
-
-        # Squelch state tracking - optimized for immediate response
-        self.squelch_open_time: Optional[float] = None
-        self.min_squelch_open_duration = 0.1
 
         # Store the event loop for thread-safe async operations
         try:
