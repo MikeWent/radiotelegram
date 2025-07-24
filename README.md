@@ -83,15 +83,6 @@ sudo apt install ffmpeg python3-venv python3-dev build-essential
 
 > less is more. do NOT use full volume.
 
-## docker (alternative)
-
-1. copy `.env.docker` to `.env` and fill in your bot credentials
-2. build and run: `./docker-run.sh build && ./docker-run.sh run`
-3. view logs: `./docker-run.sh logs`
-4. stop: `./docker-run.sh stop`
-
-> Note: Docker setup handles all dependencies automatically but requires proper audio device access.
-
 # license
 MIT
 
