@@ -4,10 +4,10 @@ import os
 import signal
 
 from aiogram import Bot, Dispatcher
-from bus import MessageBus
+from radiotelegram.bus import MessageBus
 from dotenv import load_dotenv
-from radio import EnhancedRxListenWorker, EnhancedTxPlayWorker
-from telegram import (
+from radiotelegram.radio import EnhancedRxListenWorker, EnhancedTxPlayWorker
+from radiotelegram.telegram import (
     SendChatActionWorker,
     TelegramMessageFetchWorker,
     VoiceMessageUploadWorker,

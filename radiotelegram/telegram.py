@@ -3,8 +3,8 @@ import os
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import FSInputFile
-from bus import MessageBus, Worker
-from events import (
+from radiotelegram.bus import MessageBus, Worker
+from radiotelegram.events import (
     RxRecordingCompleteEvent,
     RxRecordingEndedEvent,
     RxRecordingStartedEvent,

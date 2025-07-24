@@ -6,8 +6,8 @@ import time
 from typing import Optional, Tuple
 
 import numpy as np
-from bus import MessageBus, Worker
-from events import (
+from radiotelegram.bus import MessageBus, Worker
+from radiotelegram.events import (
     RxNoiseFloorStatsEvent,
     RxRecordingCompleteEvent,
     RxRecordingEndedEvent,

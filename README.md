@@ -56,9 +56,14 @@ Components:
 1. copy `.env.example` to `.env`
 2. edit file: fill bot token, group id and topic id (if present).
 
-### dependencies
+### run with docker
 ```
-sudo apt install ffmpeg python3-venv portaudio19-dev python3-dev build-essential 
+docker compose up
+```
+
+### run manually
+```
+sudo apt install ffmpeg python3-venv python3-dev build-essential 
 ```
 
 > Note:
@@ -77,6 +82,15 @@ sudo apt install ffmpeg python3-venv portaudio19-dev python3-dev build-essential
 3. adjust pc audio output volume so there is no voice distortion on the receiving end.
 
 > less is more. do NOT use full volume.
+
+## docker (alternative)
+
+1. copy `.env.docker` to `.env` and fill in your bot credentials
+2. build and run: `./docker-run.sh build && ./docker-run.sh run`
+3. view logs: `./docker-run.sh logs`
+4. stop: `./docker-run.sh stop`
+
+> Note: Docker setup handles all dependencies automatically but requires proper audio device access.
 
 # license
 MIT
