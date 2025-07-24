@@ -11,30 +11,29 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - TELEGRAM_TOPIC_ID=${TELEGRAM_TOPIC_ID}
-      - AUDIO_DEVICE=${AUDIO_DEVICE:-pulse}
+      - AUDIO_DEVICE=${AUDIO_DEVICE:-pipewire}
+      - PULSE_SERVER=unix:/run/user/1000/pulse/native
+      - XDG_RUNTIME_DIR=/run/user/1000
     
     # Load environment from .env file
     env_file:
       - .env
     
     # Audio device access
-    devices:
-      - /dev/snd:/dev/snd
+    # devices:
+    #   - /dev/snd:/dev/snd
     
     # Volume mounts
     volumes:
-      # Audio socket (try PulseAudio first, then PipeWire)
-      - /run/user/1000/pulse:/run/user/1000/pulse
+      # PulseAudio/PipeWire socket access
+      - /run/user/1000/pulse:/run/user/1000/pulse:rw
+      - /run/user/1000/pipewire-0:/run/user/1000/pipewire-0:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
     
     # Network mode for audio access
     network_mode: host
     
-    # Privileged mode might be needed for audio device access
-    # privileged: true
-    
-    # Alternative: specific capabilities for audio
     cap_add:
       - SYS_NICE  # For audio priority
     
-    # User mapping (match host user for audio access)
     user: "1000:1000"

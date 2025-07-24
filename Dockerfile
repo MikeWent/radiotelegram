@@ -6,8 +6,11 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     alsa-utils \
     pulseaudio-utils \
+    pipewire-pulse \
+    pipewire-alsa \
     libasound2-dev \
     libpulse-dev \
+    libpipewire-0.3-dev \
     # System utilities
     lsof \
     procps \
@@ -36,8 +39,8 @@ COPY --chown=appuser:appuser radiotelegram/ ./radiotelegram/
 COPY --chown=appuser:appuser README.md ./
 
 # Create directories for temporary files and recordings
-RUN mkdir -p /tmp/radiotelegram /app/recordings && \
-    chown -R appuser:appuser /tmp/radiotelegram /app/recordings
+RUN mkdir -p /tmp/radiotelegram /app/recordings /run/user/1000 && \
+    chown -R appuser:appuser /tmp/radiotelegram /app/recordings /run/user/1000
 
 # Switch to non-root user
 USER appuser
