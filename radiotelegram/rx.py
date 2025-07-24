@@ -529,8 +529,16 @@ class EnhancedRxListenWorker(Worker):
         self.process = None
         self.silence_counter = 0
 
+        # Pre-recording buffer to capture audio before squelch opens
+        self.pre_record_duration = 0.5  # Seconds of audio to buffer before squelch
+        self.pre_record_buffer = []  # Circular buffer for audio chunks
+        self.max_pre_record_chunks = int(
+            self.pre_record_duration * sample_rate / chunk_size
+        )
+
         # File paths
         self.recording_filepath: Optional[str] = None
+        self.pre_record_filepath: Optional[str] = None
         self.recording_start_time: Optional[datetime.datetime] = None
 
         # Advanced audio processing
@@ -547,7 +555,7 @@ class EnhancedRxListenWorker(Worker):
 
         # Squelch state tracking - optimized for immediate response
         self.squelch_open_time: Optional[float] = None
-        self.min_squelch_open_duration = 0.1  # Reduced from 0.5s for faster response
+        self.min_squelch_open_duration = 0.1
 
         # Store the event loop for thread-safe async operations
         try:
@@ -780,6 +788,47 @@ class EnhancedRxListenWorker(Worker):
         self.logger.error("8. For ALSA fallback: 'sudo alsa force-reload'")
         self.logger.error("9. Check for exclusive mode: kill other audio processes")
 
+    @cpu_intensive
+    def _add_to_pre_record_buffer(self, audio_chunk: np.ndarray):
+        """Add audio chunk to the pre-recording circular buffer."""
+        # Convert to bytes for consistent storage
+        audio_bytes = audio_chunk.tobytes()
+
+        # Add to circular buffer
+        self.pre_record_buffer.append(audio_bytes)
+
+        # Maintain buffer size
+        if len(self.pre_record_buffer) > self.max_pre_record_chunks:
+            self.pre_record_buffer.pop(0)
+
+    @cpu_intensive
+    def _save_pre_record_buffer(self, filepath: str):
+        """Save the pre-recording buffer to a WAV file."""
+        if not self.pre_record_buffer:
+            self.logger.warning("No pre-record buffer to save")
+            return False
+
+        try:
+            # Combine all buffered chunks
+            combined_bytes = b"".join(self.pre_record_buffer)
+
+            # Convert bytes back to numpy array
+            audio_data = np.frombuffer(combined_bytes, dtype=np.int16)
+
+            # Save as WAV file
+            wavfile.write(filepath, self.sample_rate, audio_data)
+
+            file_size = os.path.getsize(filepath)
+            duration = len(audio_data) / self.sample_rate
+            self.logger.debug(
+                f"Saved pre-record buffer: {file_size} bytes, {duration:.3f}s"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to save pre-record buffer: {e}")
+            return False
+
     def _parse_alsa_devices(self, stderr_output):
         """Parse FFmpeg ALSA device list output to extract available devices."""
         devices = []
@@ -860,13 +909,23 @@ class EnhancedRxListenWorker(Worker):
             return False
 
     def start_recording(self):
-        """Start recording with enhanced processing."""
+        """Start recording with enhanced processing and pre-record buffer."""
         if self.recording:
             return
 
         os.makedirs("/tmp", exist_ok=True)
         timestamp = datetime.datetime.now().timestamp()
-        filename = f"recording_{timestamp:.3f}.wav"  # Use WAV for better processing
+
+        # First, save the pre-record buffer
+        pre_record_filename = f"pre_record_{timestamp:.3f}.wav"
+        pre_record_filepath = os.path.join("/tmp", pre_record_filename)
+
+        # Save buffered audio to catch the beginning of transmission
+        if self._save_pre_record_buffer(pre_record_filepath):
+            self.logger.info(f"Pre-record buffer saved: {pre_record_filepath}")
+
+        # Create main recording file
+        filename = f"recording_{timestamp:.3f}.wav"
         self.recording_filepath = os.path.join("/tmp", filename)
         self.recording_start_time = datetime.datetime.now()
 
@@ -905,15 +964,31 @@ class EnhancedRxListenWorker(Worker):
                 _, stderr = self.process.communicate()
                 self.logger.error(f"FFmpeg failed to start recording: {stderr}")
                 self.recording = False
+                # Clean up pre-record file if recording failed
+                if os.path.exists(pre_record_filepath):
+                    os.remove(pre_record_filepath)
                 return
 
             self.recording = True
             self.silence_counter = 0
+
+            # Store pre-record filepath for later merging
+            self.pre_record_filepath = (
+                pre_record_filepath if os.path.exists(pre_record_filepath) else None
+            )
+
             asyncio.run(self.bus.publish(RxRecordingStartedEvent()))
             self.logger.info(f"Enhanced recording started: {self.recording_filepath}")
+            if self.pre_record_filepath:
+                self.logger.info(
+                    f"Pre-record buffer will be merged: {self.pre_record_filepath}"
+                )
         except Exception as e:
             self.logger.error(f"Failed to start recording: {e}")
             self.recording = False
+            # Clean up pre-record file if recording failed
+            if os.path.exists(pre_record_filepath):
+                os.remove(pre_record_filepath)
 
     def stop_recording(self):
         """Stop recording and apply advanced processing."""
@@ -984,7 +1059,7 @@ class EnhancedRxListenWorker(Worker):
 
     @cpu_intensive
     def _process_recording(self, duration: float):
-        """Apply advanced processing to recorded audio."""
+        """Apply advanced processing to recorded audio with pre-record buffer merge."""
         if not self.recording_filepath:
             return
 
@@ -996,25 +1071,87 @@ class EnhancedRxListenWorker(Worker):
             return
 
         try:
-            processed_filepath = self.recording_filepath.replace(
-                ".wav", "_processed.ogg"
-            )
+            # Step 1: Merge pre-record buffer with main recording if available
+            merged_filepath = self.recording_filepath
+
+            if self.pre_record_filepath and os.path.exists(self.pre_record_filepath):
+                # Create a merged file that includes the pre-record buffer
+                merged_filepath = self.recording_filepath.replace(".wav", "_merged.wav")
+
+                # Use FFmpeg to concatenate pre-record buffer and main recording
+                concat_command = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    self.pre_record_filepath,
+                    "-i",
+                    self.recording_filepath,
+                    "-filter_complex",
+                    "[0:a][1:a]concat=n=2:v=0:a=1[a]",
+                    "-map",
+                    "[a]",
+                    "-c:a",
+                    "pcm_s16le",
+                    merged_filepath,
+                ]
+
+                self.logger.debug(
+                    f"Merging pre-record buffer with command: {' '.join(concat_command)}"
+                )
+
+                merge_result = subprocess.run(
+                    concat_command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15,
+                )
+
+                if merge_result.returncode == 0:
+                    self.logger.info(
+                        f"Successfully merged pre-record buffer with main recording"
+                    )
+                    # Update duration to include pre-record buffer
+                    try:
+                        sample_rate, merged_audio_data = wavfile.read(merged_filepath)
+                        total_duration = len(merged_audio_data) / sample_rate
+                        self.logger.info(
+                            f"Total merged duration: {total_duration:.3f}s (was {duration:.3f}s)"
+                        )
+                        duration = total_duration
+                    except Exception as e:
+                        self.logger.warning(f"Could not read merged file duration: {e}")
+                        duration += self.pre_record_duration  # Estimate
+                else:
+                    self.logger.error(
+                        f"Failed to merge pre-record buffer: {merge_result.stderr}"
+                    )
+                    # Fall back to using original recording without pre-record buffer
+                    merged_filepath = self.recording_filepath
+
+                # Clean up pre-record buffer file
+                try:
+                    os.remove(self.pre_record_filepath)
+                except:
+                    pass
+
+            processed_filepath = merged_filepath.replace(".wav", "_processed.ogg")
 
             # Advanced FFmpeg filter chain for radio processing
             filter_complex = (
-                # 1. Trim to remove trailing silence
-                f"[0:a]atrim=start=0:duration={duration},"
-                # 2. High-pass filter to remove low-frequency noise
+                # Note: We don't trim the beginning anymore since we want to keep the pre-record buffer
+                "[0:a]"
+                # 1. High-pass filter to remove low-frequency noise
                 "highpass=f=300,"
-                # 3. De-emphasis (radio typically has pre-emphasis)
+                # 2. De-emphasis (radio typically has pre-emphasis)
                 "treble=g=-6:f=1000:width_type=h:width=1000,"
-                # 4. Bandpass filter for voice clarity
+                # 3. Bandpass filter for voice clarity
                 "lowpass=f=3400,"
-                # 5. Dynamic range compression for consistent levels
+                # 4. Dynamic range compression for consistent levels
                 "compand=attacks=0.01:decays=0.5:points=-70/-70|-60/-50|-30/-20|-10/-10:soft-knee=6:gain=0:volume=-20,"
-                # 6. Noise reduction (gentle)
+                # 5. Noise reduction (gentle)
                 "afftdn=nr=10:nf=-50:tn=1,"
-                # 7. Final limiter to prevent clipping
+                # 6. Final limiter to prevent clipping
                 "alimiter=level_in=1:level_out=1:limit=-1dB:attack=5:release=50[a]"
             )
 
@@ -1022,7 +1159,7 @@ class EnhancedRxListenWorker(Worker):
                 "ffmpeg",
                 "-y",
                 "-i",
-                self.recording_filepath,
+                merged_filepath,
                 "-filter_complex",
                 filter_complex,
                 "-map",
@@ -1087,9 +1224,16 @@ class EnhancedRxListenWorker(Worker):
         except Exception as e:
             self.logger.error(f"Error processing recording: {e}")
         finally:
-            # Clean up raw recording file
+            # Clean up recording files
             if os.path.exists(self.recording_filepath):
                 os.remove(self.recording_filepath)
+
+            # Clean up merged file if it was created
+            merged_filepath = self.recording_filepath.replace(".wav", "_merged.wav")
+            if merged_filepath != self.recording_filepath and os.path.exists(
+                merged_filepath
+            ):
+                os.remove(merged_filepath)
 
     def _process_audio_chunk_immediate(self, audio_chunk: np.ndarray):
         """
@@ -1098,6 +1242,10 @@ class EnhancedRxListenWorker(Worker):
         """
         start_time = time.time()
         try:
+            # Always add to pre-record buffer (unless we're already recording)
+            if not self.recording:
+                self._add_to_pre_record_buffer(audio_chunk)
+
             # Call squelch processing directly (synchronously) for immediate response
             # This bypasses the @cpu_intensive threading to eliminate latency
             squelch_open, stats = self._immediate_squelch_process(audio_chunk)
@@ -1106,17 +1254,10 @@ class EnhancedRxListenWorker(Worker):
             current_time = time.time()
 
             if squelch_open and not self.recording:
-                # Squelch opened - start recording immediately
-                if self.squelch_open_time is None:
-                    self.squelch_open_time = current_time
-                    self.logger.debug("Squelch opened - starting delay timer")
-                elif (
-                    current_time - self.squelch_open_time
-                ) > self.min_squelch_open_duration:
-                    # Squelch has been open long enough to start recording
-                    self.start_recording()
-                    self.squelch_open_time = None
-                    self.logger.info("Recording started after squelch delay")
+                # Squelch opened - start recording immediately (no delay needed now)
+                self.start_recording()
+                self.squelch_open_time = None
+                self.logger.info("Recording started immediately on squelch open")
 
             elif not squelch_open:
                 # Squelch closed
@@ -1284,6 +1425,10 @@ class EnhancedRxListenWorker(Worker):
         The @cpu_intensive decorator on squelch.process() handles threading automatically.
         """
         try:
+            # Always add to pre-record buffer (unless we're already recording)
+            if not self.recording:
+                self._add_to_pre_record_buffer(audio_chunk)
+
             # The squelch.process method is marked with @cpu_intensive, so it will
             # automatically run in a separate thread via the bus system
             squelch_open, stats = self.squelch.process(audio_chunk)
@@ -1292,15 +1437,9 @@ class EnhancedRxListenWorker(Worker):
             current_time = time.time()
 
             if squelch_open and not self.recording:
-                # Squelch opened
-                if self.squelch_open_time is None:
-                    self.squelch_open_time = current_time
-                elif (
-                    current_time - self.squelch_open_time
-                ) > self.min_squelch_open_duration:
-                    # Squelch has been open long enough to start recording
-                    self.start_recording()
-                    self.squelch_open_time = None
+                # Squelch opened - start recording immediately (no delay needed now)
+                self.start_recording()
+                self.squelch_open_time = None
 
             elif not squelch_open:
                 # Squelch closed
