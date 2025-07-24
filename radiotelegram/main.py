@@ -7,7 +7,8 @@ from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
 from radiotelegram.bus import MessageBus
-from radiotelegram.radio import EnhancedRxListenWorker, EnhancedTxPlayWorker
+from radiotelegram.rx import EnhancedRxListenWorker
+from radiotelegram.tx import EnhancedTxPlayWorker
 from radiotelegram.telegram import (
     SendChatActionWorker,
     TelegramMessageFetchWorker,
