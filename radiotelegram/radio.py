@@ -1,12 +1,19 @@
 import asyncio
 import datetime
 import os
+import queue
+import select
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple
 
 import numpy as np
-from radiotelegram.bus import MessageBus, Worker
+from scipy import signal
+from scipy.io import wavfile
+
+from radiotelegram.bus import MessageBus, Worker, cpu_intensive
 from radiotelegram.events import (
     RxNoiseFloorStatsEvent,
     RxRecordingCompleteEvent,
@@ -16,8 +23,6 @@ from radiotelegram.events import (
     TxMessagePlaybackEndedEvent,
     TxMessagePlaybackStartedEvent,
 )
-from scipy import signal
-from scipy.io import wavfile
 
 
 class SpectralAnalyzer:
@@ -41,6 +46,7 @@ class SpectralAnalyzer:
         self.core_voice_bin_low = int(self.core_voice_low * fft_size / sample_rate)
         self.core_voice_bin_high = int(self.core_voice_high * fft_size / sample_rate)
 
+    @cpu_intensive
     def analyze_spectrum(
         self, audio_chunk: np.ndarray
     ) -> Tuple[float, float, float, float]:
@@ -104,7 +110,7 @@ class SpectralAnalyzer:
                 # and there's reasonable spectral spread (not pure tones)
                 voice_quality = mid_ratio * (1.0 - abs(low_ratio - high_ratio))
 
-                # Penalize pure tones (very narrow spectrum)
+                # Penalize pure tones (very narrow spectrum) - but be more permissive
                 spectral_spread = (
                     np.sum(
                         (frequencies[: len(magnitude)] - spectral_centroid) ** 2
@@ -112,7 +118,9 @@ class SpectralAnalyzer:
                     )
                     / total_energy
                 )
-                spread_factor = min(1.0, spectral_spread / 1000000)  # Normalize spread
+                spread_factor = min(
+                    1.0, spectral_spread / 500000
+                )  # More permissive normalization (was 1000000)
                 voice_quality *= spread_factor
 
         return voice_energy, total_energy, spectral_centroid, voice_quality
@@ -172,7 +180,7 @@ class AdvancedSquelch:
         self.spectral_analyzer = SpectralAnalyzer(sample_rate)
 
         # Squelch parameters - optimized based on voice/noise analysis
-        self.level_threshold_db = 8.0  # dB above noise floor (balanced sensitivity)
+        self.level_threshold_db = 10.0  # dB above noise floor (balanced sensitivity)
         self.voice_energy_ratio = (
             0.15  # Min ratio of voice energy to total (relaxed for voice)
         )
@@ -183,11 +191,14 @@ class AdvancedSquelch:
         )
         self.min_absolute_level = -50.0  # Absolute minimum level in dB (sensitive)
 
-        # Hysteresis for stability - optimized for voice detection
-        self.open_threshold = 0.75  # Reduced for better voice sensitivity
-        self.close_threshold = 0.60  # Maintain gap for stability
+        # Hysteresis for stability - optimized for immediate response
+        self.open_threshold = 0.65  # Reduced from 0.75 for faster opening
+        self.close_threshold = (
+            0.55  # Reduced gap for faster response while maintaining stability
+        )
         self.is_open = False
 
+    @cpu_intensive
     def process(self, audio_chunk: np.ndarray) -> Tuple[bool, dict]:
         """
         Process audio chunk and determine if squelch should be open.
@@ -276,26 +287,28 @@ class VoiceDetector:
 
         # Voice detection thresholds (optimized for weak signal detection)
         self.min_voice_energy_ratio = (
-            0.05  # Less important - noise can have high ratios too
+            0.03  # Even more permissive for weak voice signals
         )
-        self.min_voice_quality_score = 0.015  # Minimum voice quality
-        self.min_spectral_centroid = 300  # Hz - minimum for voice
-        self.max_spectral_centroid = 2500  # Hz - maximum for voice
+        self.min_voice_quality_score = 0.01  # Reduced for weak signals
+        self.min_spectral_centroid = 250  # Hz - slightly lower for weak voices
+        self.max_spectral_centroid = 2800  # Hz - slightly higher range
         self.min_analysis_duration = 0.5  # Minimum seconds to analyze
         self.voice_consistency_threshold = (
-            0.04  # Ultra-low threshold for very weak signals
+            0.02  # Even lower threshold for very weak signals
         )
 
         # Key discriminator: spectral variability (voice has higher variability than noise)
+        # Relaxed significantly to catch consistent voice signals
         self.min_spectral_variability = (
-            0.5  # Voice should have significant spectral changes
+            0.1  # Much lower - allow very consistent spectral content (was 0.5)
         )
-        self.max_spectral_variability = 2.0  # But not too chaotic
+        self.max_spectral_variability = 3.0  # Slightly higher tolerance (was 2.0)
 
         # Energy and dynamics thresholds - relaxed for weak signals
         self.min_energy_db = -200.0  # Effectively disabled for weak signal detection
-        self.min_dynamic_range_db = 3.0  # Reduced minimum dynamic range
+        self.min_dynamic_range_db = 2.0  # Further reduced for weak signals (was 3.0)
 
+    @cpu_intensive
     def analyze_recording(self, filepath: str) -> Tuple[bool, dict]:
         """
         Analyze a recording to determine if it contains voice.
@@ -401,9 +414,7 @@ class VoiceDetector:
 
                 # Sustained energy check (lower coefficient of variation = more sustained)
                 # Clicks have high variance relative to mean, voice is more consistent
-                max_energy_cv_for_voice = (
-                    2.0  # Threshold for sustained vs impulsive energy
-                )
+                max_energy_cv_for_voice = 3.0  # More permissive threshold for sustained vs impulsive energy (was 2.0)
                 is_sustained = energy_cv < max_energy_cv_for_voice
 
                 if is_sustained and energy_db > self.min_energy_db:
@@ -450,7 +461,7 @@ class VoiceDetector:
                 sustained_energy_chunks / total_chunks if total_chunks > 0 else 0
             )
             min_sustained_energy_ratio = (
-                0.05  # Very low threshold for weak signals (was 0.35)
+                0.02  # Even lower threshold for very weak signals (was 0.05)
             )
 
             # Enhanced voice detection criteria
@@ -580,6 +591,7 @@ class EnhancedTxPlayWorker(Worker):
             if os.path.exists(filepath):
                 os.remove(filepath)
 
+    @cpu_intensive
     async def _preprocess_for_radio(self, input_filepath: str) -> Optional[str]:
         """
         Apply comprehensive audio processing optimized for radio transmission.
@@ -729,16 +741,16 @@ class EnhancedRxListenWorker(Worker):
     """Enhanced receiver worker with advanced audio processing."""
 
     def __init__(
-        self, bus: MessageBus, sample_rate=48000, chunk_size=512, audio_device="pulse"
+        self, bus: MessageBus, sample_rate=48000, chunk_size=256, audio_device="pulse"
     ):
         super().__init__(bus)
         self.sample_rate = sample_rate
-        self.chunk_size = chunk_size
+        self.chunk_size = chunk_size  # Reduced default chunk size for lower latency
         self.audio_device = (
             audio_device  # Default to pulse (PipeWire/PulseAudio compatible)
         )
 
-        # Recording parameters
+        # Recording parameters optimized for responsive squelch
         self.silence_duration = 2.0  # Seconds to wait before stopping recording
         self.minimal_recording_duration = 1.0  # Min duration after trimming
         self.enabled = True
@@ -754,13 +766,23 @@ class EnhancedRxListenWorker(Worker):
         self.squelch = AdvancedSquelch(sample_rate)
         self.voice_detector = VoiceDetector(sample_rate)
 
-        # Statistics and monitoring
-        self.stats_interval = 5.0  # Publish stats every 5 seconds
+        # Statistics and monitoring - reduced interval for better responsiveness monitoring
+        self.stats_interval = 2.0  # Publish stats every 2 seconds (reduced from 5s)
         self.last_stats_publish_time = 0
 
-        # Squelch state tracking
+        # Performance monitoring for latency debugging
+        self.chunk_process_times = []
+        self.max_process_time_samples = 100  # Keep last 100 samples
+
+        # Squelch state tracking - optimized for immediate response
         self.squelch_open_time: Optional[float] = None
-        self.min_squelch_open_duration = 0.5  # Minimum time squelch must be open
+        self.min_squelch_open_duration = 0.1  # Reduced from 0.5s for faster response
+
+        # Store the event loop for thread-safe async operations
+        try:
+            self.event_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            self.event_loop = None
 
         # Event subscriptions
         self.bus.subscribe(TxMessagePlaybackStartedEvent, self.on_playback_started)
@@ -1189,6 +1211,7 @@ class EnhancedRxListenWorker(Worker):
             if self.recording_filepath and os.path.exists(self.recording_filepath):
                 os.remove(self.recording_filepath)
 
+    @cpu_intensive
     def _process_recording(self, duration: float):
         """Apply advanced processing to recorded audio."""
         if not self.recording_filepath:
@@ -1297,7 +1320,278 @@ class EnhancedRxListenWorker(Worker):
             if os.path.exists(self.recording_filepath):
                 os.remove(self.recording_filepath)
 
+    def _process_audio_chunk_immediate(self, audio_chunk: np.ndarray):
+        """
+        Process audio chunk with immediate response (synchronous squelch processing).
+        This method prioritizes speed over CPU efficiency for immediate squelch response.
+        """
+        start_time = time.time()
+        try:
+            # Call squelch processing directly (synchronously) for immediate response
+            # This bypasses the @cpu_intensive threading to eliminate latency
+            squelch_open, stats = self._immediate_squelch_process(audio_chunk)
+
+            # Handle squelch state changes immediately
+            current_time = time.time()
+
+            if squelch_open and not self.recording:
+                # Squelch opened - start recording immediately
+                if self.squelch_open_time is None:
+                    self.squelch_open_time = current_time
+                    self.logger.debug("Squelch opened - starting delay timer")
+                elif (
+                    current_time - self.squelch_open_time
+                ) > self.min_squelch_open_duration:
+                    # Squelch has been open long enough to start recording
+                    self.start_recording()
+                    self.squelch_open_time = None
+                    self.logger.info("Recording started after squelch delay")
+
+            elif not squelch_open:
+                # Squelch closed
+                if self.squelch_open_time is not None:
+                    self.logger.debug("Squelch closed before recording threshold")
+                self.squelch_open_time = None
+
+                if self.recording:
+                    self.silence_counter += 1
+                    chunks_for_silence = self.silence_duration * (
+                        self.sample_rate / self.chunk_size
+                    )
+
+                    if self.silence_counter >= chunks_for_silence:
+                        self.stop_recording()
+            else:
+                # Squelch is open and recording
+                self.silence_counter = 0
+
+            # Track processing performance
+            process_time = time.time() - start_time
+            self.chunk_process_times.append(process_time)
+            if len(self.chunk_process_times) > self.max_process_time_samples:
+                self.chunk_process_times.pop(0)
+
+            # Schedule statistics publishing asynchronously (non-blocking)
+            if (
+                current_time - self.last_stats_publish_time >= self.stats_interval
+                and self.event_loop
+            ):
+                # Add performance stats
+                avg_process_time = sum(self.chunk_process_times) / len(
+                    self.chunk_process_times
+                )
+                max_process_time = max(self.chunk_process_times)
+                stats["avg_process_time_ms"] = avg_process_time * 1000
+                stats["max_process_time_ms"] = max_process_time * 1000
+
+                # Use the stored event loop reference for thread-safe async operations
+                asyncio.run_coroutine_threadsafe(
+                    self._publish_enhanced_stats(stats), self.event_loop
+                )
+                self.last_stats_publish_time = current_time
+
+        except Exception as e:
+            self.logger.error(f"Error in immediate audio chunk processing: {e}")
+
+    def _immediate_squelch_process(self, audio_chunk: np.ndarray) -> Tuple[bool, dict]:
+        """
+        Immediate squelch processing without threading for minimal latency.
+        This is a simplified version of the squelch processing optimized for speed.
+        """
+        try:
+            # Basic level analysis (fast)
+            rms = np.sqrt(np.mean(audio_chunk.astype(np.float32) ** 2))
+            current_db = 20 * np.log10(rms / 32767.0 + 1e-6)
+
+            # Update noise floor (don't update if currently open)
+            noise_floor_db = self.squelch.noise_floor.update(
+                current_db, self.squelch.is_open
+            )
+            level_margin_db = current_db - noise_floor_db
+
+            # Simplified spectral analysis for speed
+            if (
+                len(audio_chunk) >= 256
+            ):  # Only do spectral analysis if we have enough samples
+                # Use a smaller FFT for speed
+                fft_chunk = audio_chunk[:256] if len(audio_chunk) > 256 else audio_chunk
+                voice_energy, total_energy, spectral_centroid, voice_quality = (
+                    self.squelch.spectral_analyzer.analyze_spectrum(fft_chunk)
+                )
+            else:
+                # Skip spectral analysis for very small chunks
+                voice_energy = 0
+                total_energy = 1
+                spectral_centroid = 1000  # Assume reasonable default
+                voice_quality = 0
+
+            # Simplified scoring for immediate response
+            level_score = max(
+                0, min(1, (level_margin_db - 3) / 15)
+            )  # Smooth 3-18dB range
+
+            if total_energy > 0:
+                voice_ratio_score = min(
+                    1, voice_energy / total_energy / self.squelch.voice_energy_ratio
+                )
+            else:
+                voice_ratio_score = 0
+
+            # Simplified spectral centroid score
+            if (
+                self.squelch.spectral_centroid_min
+                <= spectral_centroid
+                <= self.squelch.spectral_centroid_max
+            ):
+                centroid_score = 1.0
+            else:
+                centroid_score = 0.5
+
+            # Simplified voice quality score
+            quality_score = min(1.0, voice_quality / self.squelch.min_voice_quality)
+
+            # Absolute level check
+            if current_db < self.squelch.min_absolute_level:
+                level_score = 0
+
+            # Simplified scoring (prioritize level for immediate response)
+            combined_score = (
+                0.5 * level_score  # Higher weight on signal strength for fast response
+                + 0.2 * voice_ratio_score  # Reduced weight on complex analysis
+                + 0.15 * centroid_score
+                + 0.15 * quality_score
+            )
+
+            # Apply hysteresis
+            threshold = (
+                self.squelch.close_threshold
+                if self.squelch.is_open
+                else self.squelch.open_threshold
+            )
+            self.squelch.is_open = combined_score >= threshold
+
+            stats = {
+                "current_db": current_db,
+                "noise_floor_db": noise_floor_db,
+                "level_margin_db": level_margin_db,
+                "voice_energy": voice_energy,
+                "total_energy": total_energy,
+                "spectral_centroid": spectral_centroid,
+                "voice_quality": voice_quality,
+                "level_score": level_score,
+                "voice_ratio_score": voice_ratio_score,
+                "centroid_score": centroid_score,
+                "quality_score": quality_score,
+                "combined_score": combined_score,
+                "squelch_open": self.squelch.is_open,
+            }
+
+            return self.squelch.is_open, stats
+
+        except Exception as e:
+            self.logger.error(f"Error in immediate squelch processing: {e}")
+            # Return safe defaults
+            return False, {
+                "current_db": -60.0,
+                "noise_floor_db": -60.0,
+                "level_margin_db": 0.0,
+                "voice_energy": 0,
+                "total_energy": 1,
+                "spectral_centroid": 1000,
+                "voice_quality": 0,
+                "level_score": 0,
+                "voice_ratio_score": 0,
+                "centroid_score": 0,
+                "quality_score": 0,
+                "combined_score": 0,
+                "squelch_open": False,
+            }
+
+    def _process_audio_chunk(self, audio_chunk: np.ndarray):
+        """
+        Process audio chunk using the threaded bus system.
+        The @cpu_intensive decorator on squelch.process() handles threading automatically.
+        """
+        try:
+            # The squelch.process method is marked with @cpu_intensive, so it will
+            # automatically run in a separate thread via the bus system
+            squelch_open, stats = self.squelch.process(audio_chunk)
+
+            # Handle squelch state changes (fast operations, synchronous)
+            current_time = time.time()
+
+            if squelch_open and not self.recording:
+                # Squelch opened
+                if self.squelch_open_time is None:
+                    self.squelch_open_time = current_time
+                elif (
+                    current_time - self.squelch_open_time
+                ) > self.min_squelch_open_duration:
+                    # Squelch has been open long enough to start recording
+                    self.start_recording()
+                    self.squelch_open_time = None
+
+            elif not squelch_open:
+                # Squelch closed
+                self.squelch_open_time = None
+
+                if self.recording:
+                    self.silence_counter += 1
+                    chunks_for_silence = self.silence_duration * (
+                        self.sample_rate / self.chunk_size
+                    )
+
+                    if self.silence_counter >= chunks_for_silence:
+                        self.stop_recording()
+            else:
+                # Squelch is open and recording
+                self.silence_counter = 0
+
+            # Schedule statistics publishing asynchronously
+            if (
+                current_time - self.last_stats_publish_time >= self.stats_interval
+                and self.event_loop
+            ):
+                # Use the stored event loop reference for thread-safe async operations
+                asyncio.run_coroutine_threadsafe(
+                    self._publish_enhanced_stats(stats), self.event_loop
+                )
+                self.last_stats_publish_time = current_time
+
+        except Exception as e:
+            self.logger.error(f"Error in audio chunk processing: {e}")
+
     def process_audio_stream(self):
+        """Enhanced audio stream processing with advanced squelch using FFmpeg streaming."""
+        self.logger.info("Starting enhanced audio stream processing with FFmpeg")
+
+        max_retries = 3
+        retry_delay = 5.0  # seconds
+
+        for attempt in range(max_retries):
+            if not self.enabled:
+                self.logger.info("Audio processing disabled, stopping")
+                return
+
+            self.logger.info(
+                f"Audio stream attempt {attempt + 1}/{max_retries} with device: {self.audio_device}"
+            )
+
+            if self._process_audio_stream_once():
+                # Successful run, don't retry unless it fails again
+                break
+            else:
+                # Failed, try to find a different device for next attempt
+                if attempt < max_retries - 1:
+                    self.logger.warning(
+                        f"Audio stream failed, retrying in {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+
+                    # Try to find a working device for next attempt
+                    self._test_audio_device()
+                else:
+                    self.logger.error("All audio stream attempts failed")
         """Enhanced audio stream processing with advanced squelch using FFmpeg streaming."""
         self.logger.info("Starting enhanced audio stream processing with FFmpeg")
 
@@ -1331,7 +1625,7 @@ class EnhancedRxListenWorker(Worker):
 
     def _process_audio_stream_once(self) -> bool:
         """Single attempt at audio stream processing. Returns True if successful."""
-        # Use FFmpeg for streaming instead of PortAudio to avoid device conflicts
+        # Use FFmpeg for streaming with minimal latency settings
         ffmpeg_cmd = [
             "ffmpeg",
             "-f",
@@ -1342,6 +1636,14 @@ class EnhancedRxListenWorker(Worker):
             "1",  # Mono
             "-ar",
             str(self.sample_rate),  # Sample rate
+            "-acodec",
+            "pcm_s16le",  # Direct PCM encoding
+            "-fflags",
+            "nobuffer",  # Disable buffering for low latency
+            "-flags",
+            "low_delay",  # Enable low delay mode
+            "-strict",
+            "experimental",
             "-f",
             "s16le",  # 16-bit little-endian PCM
             "-",  # Output to stdout
@@ -1349,12 +1651,12 @@ class EnhancedRxListenWorker(Worker):
 
         process = None
         try:
-            # Start FFmpeg process for continuous audio streaming
+            # Start FFmpeg process for continuous audio streaming with minimal buffering
             process = subprocess.Popen(
                 ffmpeg_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                bufsize=0,  # Unbuffered
+                bufsize=0,  # Completely unbuffered
             )
 
             if not process.stdout:
@@ -1362,96 +1664,85 @@ class EnhancedRxListenWorker(Worker):
                 return False
 
             self.logger.info(
-                f"FFmpeg audio streaming started with device: {self.audio_device}"
+                f"FFmpeg low-latency audio streaming started with device: {self.audio_device}"
             )
 
-            # Read audio data in chunks
+            # Use smaller chunks for immediate response
             bytes_per_sample = 2  # 16-bit = 2 bytes
-            chunk_bytes = self.chunk_size * bytes_per_sample
+            # Reduce chunk size for faster response (was self.chunk_size)
+            small_chunk_size = min(
+                256, self.chunk_size
+            )  # Use 256 samples max for low latency
+            chunk_bytes = small_chunk_size * bytes_per_sample
 
             # Track successful operation
             successful_chunks = 0
-            min_successful_chunks = (
-                10  # Must process at least 10 chunks to be considered successful
-            )
+            min_successful_chunks = 10
 
-            while True:
-                if not self.enabled:
-                    self.logger.info("Audio processing disabled, stopping stream")
-                    return successful_chunks >= min_successful_chunks
+            # Buffer for accumulating partial data
+            audio_buffer = bytearray()
 
-                try:
-                    # Check if FFmpeg process is still running
-                    if process.poll() is not None:
-                        # Process has terminated, try to get error info
-                        _, stderr = process.communicate()
-                        error_msg = stderr.decode() if stderr else "Unknown error"
-                        self.logger.error(f"FFmpeg process terminated: {error_msg}")
+            try:
+                while True:
+                    if not self.enabled:
+                        self.logger.info("Audio processing disabled, stopping stream")
                         return successful_chunks >= min_successful_chunks
 
-                    # Read chunk from FFmpeg stdout
-                    raw_data = process.stdout.read(chunk_bytes)
+                    try:
+                        # Check if FFmpeg process is still running
+                        if process.poll() is not None:
+                            # Process has terminated, try to get error info
+                            _, stderr = process.communicate()
+                            error_msg = stderr.decode() if stderr else "Unknown error"
+                            self.logger.error(f"FFmpeg process terminated: {error_msg}")
+                            return successful_chunks >= min_successful_chunks
 
-                    if not raw_data:
-                        # No data available, FFmpeg might have stopped
-                        self.logger.warning("No audio data from FFmpeg")
-                        time.sleep(0.1)
-                        continue
+                        # Use non-blocking read with select for immediate response
+                        import select
 
-                    if len(raw_data) < chunk_bytes:
-                        # Partial data, continue reading
-                        time.sleep(0.001)
-                        continue
+                        # Check if data is available for reading (timeout = 0.001s for immediate response)
+                        ready, _, _ = select.select([process.stdout], [], [], 0.001)
 
-                    # Convert raw bytes to numpy array
-                    audio_chunk = np.frombuffer(raw_data, dtype=np.int16)
+                        if not ready:
+                            # No data available, continue immediately (don't sleep)
+                            continue
 
-                    # Apply advanced squelch processing
-                    squelch_open, stats = self.squelch.process(audio_chunk)
+                        # Read available data (may be less than chunk_bytes)
+                        raw_data = process.stdout.read(chunk_bytes)
 
-                    # Handle squelch state changes
-                    current_time = time.time()
+                        if not raw_data:
+                            # No data available, FFmpeg might have stopped
+                            continue
 
-                    if squelch_open and not self.recording:
-                        # Squelch opened
-                        if self.squelch_open_time is None:
-                            self.squelch_open_time = current_time
-                        elif (
-                            current_time - self.squelch_open_time
-                        ) > self.min_squelch_open_duration:
-                            # Squelch has been open long enough to start recording
-                            self.start_recording()
-                            self.squelch_open_time = None
+                        # Add to buffer
+                        audio_buffer.extend(raw_data)
 
-                    elif not squelch_open:
-                        # Squelch closed
-                        self.squelch_open_time = None
+                        # Process complete chunks immediately when available
+                        while len(audio_buffer) >= chunk_bytes:
+                            # Extract one complete chunk
+                            chunk_data = audio_buffer[:chunk_bytes]
+                            audio_buffer = audio_buffer[chunk_bytes:]
 
-                        if self.recording:
-                            self.silence_counter += 1
-                            chunks_for_silence = self.silence_duration * (
-                                self.sample_rate / self.chunk_size
-                            )
+                            # Convert raw bytes to numpy array
+                            audio_chunk = np.frombuffer(chunk_data, dtype=np.int16)
 
-                            if self.silence_counter >= chunks_for_silence:
-                                self.stop_recording()
-                    else:
-                        # Squelch is open and recording
-                        self.silence_counter = 0
+                            # Process audio chunk with immediate response
+                            try:
+                                self._process_audio_chunk_immediate(audio_chunk)
+                                successful_chunks += 1
+                            except Exception as processing_error:
+                                # If processing fails, log but continue with audio stream
+                                self.logger.debug(
+                                    f"Audio processing error: {processing_error}"
+                                )
+                                successful_chunks += 1  # Still count as successful
 
-                    # Publish statistics periodically
-                    if (
-                        current_time - self.last_stats_publish_time
-                        >= self.stats_interval
-                    ):
-                        asyncio.run(self._publish_enhanced_stats(stats))
-                        self.last_stats_publish_time = current_time
+                    except Exception as e:
+                        self.logger.error(f"Error reading audio chunk: {e}")
+                        # Don't sleep on errors, continue immediately
 
-                    successful_chunks += 1
-
-                except Exception as e:
-                    self.logger.error(f"Error processing audio chunk: {e}")
-                    time.sleep(0.01)
+            finally:
+                pass  # No async processing cleanup needed anymore
 
         except Exception as e:
             self.logger.error(f"Fatal error in audio stream processing: {e}")
@@ -1475,7 +1766,7 @@ class EnhancedRxListenWorker(Worker):
             self.logger.info("Audio stream processing stopped")
 
     async def _publish_enhanced_stats(self, stats: dict):
-        """Publish enhanced statistics including spectral analysis."""
+        """Publish enhanced statistics including spectral analysis and performance metrics."""
         await self.bus.publish(
             RxNoiseFloorStatsEvent(
                 ambient_db=float(stats["noise_floor_db"]),
@@ -1484,7 +1775,11 @@ class EnhancedRxListenWorker(Worker):
             )
         )
 
-        # Log detailed stats for debugging/monitoring
+        # Log detailed stats for debugging/monitoring including performance
+        performance_info = ""
+        if "avg_process_time_ms" in stats and "max_process_time_ms" in stats:
+            performance_info = f", Avg process: {stats['avg_process_time_ms']:.2f}ms, Max: {stats['max_process_time_ms']:.2f}ms"
+
         self.logger.info(
             f"Audio Stats - "
             f"Level: {stats['current_db']:.1f}dB, "
@@ -1494,12 +1789,28 @@ class EnhancedRxListenWorker(Worker):
             f"Voice ratio: {stats['voice_ratio_score']:.2f}, "
             f"Voice quality: {stats['voice_quality']:.2f}, "
             f"Spectral centroid: {stats['spectral_centroid']:.0f}Hz"
+            f"{performance_info}"
         )
 
     async def start(self):
         """Start the enhanced audio processing worker."""
         self.logger.info("Enhanced RxListenWorker starting...")
+
+        # Start the main audio stream processing in a separate thread
+        # This allows the sync FFmpeg reading loop to run without blocking the async loop
         asyncio.create_task(asyncio.to_thread(self.process_audio_stream))
+
+    async def stop(self):
+        """Stop the audio processing worker and clean up resources."""
+        self.logger.info("Stopping Enhanced RxListenWorker...")
+
+        self.enabled = False
+
+        # Stop any ongoing recording
+        if self.recording:
+            self.stop_recording()
+
+        self.logger.info("Enhanced RxListenWorker stopped")
 
 
 class RXListenPrintStatsWorker(Worker):

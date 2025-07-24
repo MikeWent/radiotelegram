@@ -3,7 +3,8 @@ import os
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import FSInputFile
-from radiotelegram.bus import MessageBus, Worker
+
+from radiotelegram.bus import MessageBus, Worker, cpu_intensive
 from radiotelegram.events import (
     RxRecordingCompleteEvent,
     RxRecordingEndedEvent,
@@ -75,6 +76,7 @@ class TelegramMessageFetchWorker(Worker):
             and message.chat.id == int(self.chat_id)
             and (message.message_thread_id == self.topic_id or self.topic_id is None)
         )
+        @cpu_intensive
         async def handle_voice_message(message: types.Message):
             filename = f"voice_{message.message_id}.ogg"
             filepath = os.path.join("/tmp", filename)
