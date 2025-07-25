@@ -188,7 +188,7 @@ class AdvancedSquelch:
         self.min_voice_quality = (
             0.02  # Minimum voice quality score (moderate requirement)
         )
-        self.min_absolute_level = -50.0  # Absolute minimum level in dB (sensitive)
+        self.min_absolute_level = -40.0  # Absolute minimum level in dB (sensitive)
 
         # Hysteresis for stability - optimized for immediate response
         self.open_threshold = 0.65  # Reduced from 0.75 for faster opening
@@ -302,7 +302,7 @@ class VoiceDetector:
         self.max_spectral_variability = 3.0  # Slightly higher tolerance (was 2.0)
 
         # Energy and dynamics thresholds - relaxed for weak signals
-        self.min_energy_db = -200.0  # Effectively disabled for weak signal detection
+        self.min_energy_db = -100.0  # Effectively disabled for weak signal detection
         self.min_dynamic_range_db = 2.0  # Further reduced for weak signals (was 3.0)
 
     @cpu_intensive
