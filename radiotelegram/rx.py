@@ -556,6 +556,11 @@ class EnhancedRxListenWorker(Worker):
         self.chunk_process_times = []
         self.max_process_time_samples = 100  # Keep last 100 samples
 
+        # Audio streaming process monitoring
+        self.streaming_process = None  # Track the streaming FFmpeg process
+        self.last_chunk_time = 0  # Track when we last received audio data
+        self.streaming_timeout = 10.0  # Seconds without audio before considering stream dead
+
         # Store the event loop for thread-safe async operations
         try:
             self.event_loop = asyncio.get_event_loop()
@@ -1347,33 +1352,48 @@ class EnhancedRxListenWorker(Worker):
 
     def _periodic_recording_health_check(self):
         """Periodic health check for recording state and FFmpeg process."""
-        if not self.recording:
-            return
-            
         try:
-            # Check recording timeout
-            if self.recording_start_time:
-                recording_duration = (
-                    datetime.datetime.now() - self.recording_start_time
-                ).total_seconds()
+            # Check recording timeout and health
+            if self.recording:
+                if self.recording_start_time:
+                    recording_duration = (
+                        datetime.datetime.now() - self.recording_start_time
+                    ).total_seconds()
+                    
+                    if recording_duration > self.max_recording_duration:
+                        self.logger.warning(f"Periodic check: Recording timeout after {recording_duration:.1f}s, force stopping")
+                        self.stop_recording()
+                        return
                 
-                if recording_duration > self.max_recording_duration:
-                    self.logger.warning(f"Periodic check: Recording timeout after {recording_duration:.1f}s, force stopping")
+                # Check FFmpeg recording process health
+                if self.process and self.process.poll() is not None:
+                    self.logger.error("Periodic check: FFmpeg recording process died, stopping recording")
                     self.stop_recording()
                     return
+                    
+                # Log recording status
+                if self.recording_start_time:
+                    recording_duration = (
+                        datetime.datetime.now() - self.recording_start_time
+                    ).total_seconds()
+                    self.logger.debug(f"Recording health check: {recording_duration:.1f}s/{self.max_recording_duration:.0f}s, silence_counter: {self.silence_counter}")
             
-            # Check FFmpeg process health
-            if self.process and self.process.poll() is not None:
-                self.logger.error("Periodic check: FFmpeg recording process died, stopping recording")
-                self.stop_recording()
-                return
+            # Check audio streaming process health (runs even when not recording)
+            if self.streaming_process:
+                if self.streaming_process.poll() is not None:
+                    self.logger.error("Periodic check: FFmpeg streaming process died")
+                    # Don't try to restart here, let the main loop handle it
+                    return
                 
-            # Log recording status
-            if self.recording_start_time:
-                recording_duration = (
-                    datetime.datetime.now() - self.recording_start_time
-                ).total_seconds()
-                self.logger.debug(f"Recording health check: {recording_duration:.1f}s/{self.max_recording_duration:.0f}s, silence_counter: {self.silence_counter}")
+                # Check if we're receiving audio data
+                current_time = time.time()
+                if self.last_chunk_time > 0:  # Only check if we've received at least one chunk
+                    time_since_last_chunk = current_time - self.last_chunk_time
+                    if time_since_last_chunk > self.streaming_timeout:
+                        self.logger.warning(f"No audio data received for {time_since_last_chunk:.1f}s, streaming may be hung")
+                        # Log additional debug info
+                        if self.streaming_process:
+                            self.logger.warning(f"Streaming process PID: {self.streaming_process.pid}, poll: {self.streaming_process.poll()}")
                 
         except Exception as e:
             self.logger.error(f"Error in periodic recording health check: {e}")
@@ -1663,6 +1683,9 @@ class EnhancedRxListenWorker(Worker):
                 bufsize=0,  # Completely unbuffered
             )
 
+            # Store reference for health monitoring
+            self.streaming_process = process
+
             if not process.stdout:
                 self.logger.error("Failed to get FFmpeg stdout stream")
                 return False
@@ -1741,12 +1764,16 @@ class EnhancedRxListenWorker(Worker):
                             try:
                                 self._process_audio_chunk_immediate(audio_chunk)
                                 successful_chunks += 1
+                                # Update last chunk time for health monitoring
+                                self.last_chunk_time = time.time()
                             except Exception as processing_error:
                                 # If processing fails, log but continue with audio stream
                                 self.logger.debug(
                                     f"Audio processing error: {processing_error}"
                                 )
                                 successful_chunks += 1  # Still count as successful
+                                # Still update chunk time even on processing errors
+                                self.last_chunk_time = time.time()
 
                     except Exception as e:
                         self.logger.error(f"Error reading audio chunk: {e}")
@@ -1774,6 +1801,8 @@ class EnhancedRxListenWorker(Worker):
                 except Exception as e:
                     self.logger.error(f"Error terminating FFmpeg process: {e}")
 
+            # Clear streaming process reference
+            self.streaming_process = None
             self.logger.info("Audio stream processing stopped")
 
     async def _publish_enhanced_stats(self, stats: dict):
@@ -1820,6 +1849,24 @@ class EnhancedRxListenWorker(Worker):
         # Stop any ongoing recording
         if self.recording:
             self.stop_recording()
+
+        # Stop streaming FFmpeg process if it's running
+        if self.streaming_process and self.streaming_process.poll() is None:
+            self.logger.info("Terminating streaming FFmpeg process")
+            try:
+                self.streaming_process.terminate()
+                self.streaming_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.logger.warning("Streaming FFmpeg termination timeout, force killing")
+                self.streaming_process.kill()
+                try:
+                    self.streaming_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.logger.error("Could not kill streaming FFmpeg process")
+            except Exception as e:
+                self.logger.error(f"Error terminating streaming FFmpeg process: {e}")
+            finally:
+                self.streaming_process = None
 
         self.logger.info("Enhanced RxListenWorker stopped")
 
