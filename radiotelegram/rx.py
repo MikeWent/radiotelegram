@@ -578,6 +578,9 @@ class EnhancedRxListenWorker(Worker):
     async def on_playback_finished(self, event: TxMessagePlaybackEndedEvent):
         """Re-enable listening after playback ends."""
         self.enabled = True
+        # Restart audio stream processing
+        self.logger.info("TX playback finished, restarting audio stream processing")
+        asyncio.create_task(asyncio.to_thread(self.process_audio_stream))
 
     def _test_audio_device(self):
         """Test audio device availability and log diagnostics."""
