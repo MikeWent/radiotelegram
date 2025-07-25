@@ -76,7 +76,6 @@ class TelegramMessageFetchWorker(Worker):
             and message.chat.id == int(self.chat_id)
             and (message.message_thread_id == self.topic_id or self.topic_id is None)
         )
-        @cpu_intensive
         async def handle_voice_message(message: types.Message):
             filename = f"voice_{message.message_id}.ogg"
             filepath = os.path.join("/tmp", filename)
