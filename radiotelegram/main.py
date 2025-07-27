@@ -12,6 +12,7 @@ from radiotelegram.rx import EnhancedRxListenWorker
 from radiotelegram.tx import EnhancedTxPlayWorker
 from radiotelegram.telegram import (
     SendChatActionWorker,
+    TelegramBotPollingWorker,
     TelegramMessageFetchWorker,
     VoiceMessageUploadWorker,
 )
@@ -40,6 +41,9 @@ def main():
     audio_listener = EnhancedRxListenWorker(bus, audio_device=AUDIO_DEVICE)
     audio_player = EnhancedTxPlayWorker(bus)
 
+    # Create telegram bot polling worker for robust connection management
+    bot_polling_worker = TelegramBotPollingWorker(bus, bot)
+
     # Create workers with optional topic_id handling
     message_fetcher = TelegramMessageFetchWorker(
         bus, bot, chat_id=CHAT_ID, topic_id=TOPIC_ID
@@ -58,6 +62,7 @@ def main():
         message_fetcher,
         action_sender,
         voice_uploader,
+        bot_polling_worker,
     ]
 
     # Global flag to signal shutdown
@@ -104,14 +109,6 @@ def main():
             thread.daemon = True
             thread.start()
             worker_threads.append(thread)
-
-        # Start telegram bot polling in a separate thread
-        bot_thread = threading.Thread(
-            target=lambda: bot.infinity_polling(timeout=10, long_polling_timeout=5),
-            name="TelegramBotThread",
-        )
-        bot_thread.daemon = True
-        bot_thread.start()
 
         # Main loop - wait for shutdown signal
         while not shutdown_flag.is_set():
