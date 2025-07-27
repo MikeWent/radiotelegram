@@ -36,7 +36,7 @@ class MessageBus:
 
     def publish(self, event):
         """Publish an event to all subscribers, processing each in a separate thread."""
-        self.logger.info(f"Publishing event: {event}")
+        self.logger.info(f"Publishing event: {event.__class__.__name__}")
         event_type = type(event)
 
         with self._lock:
