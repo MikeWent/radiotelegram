@@ -542,6 +542,7 @@ class EnhancedRxListenWorker(Worker):
         self.recording_filepath: Optional[str] = None
         self.pre_record_filepath: Optional[str] = None
         self.recording_start_time: Optional[datetime.datetime] = None
+        self.recording_buffer = []  # Buffer to collect audio during recording
 
         # Advanced audio processing
         self.squelch = AdvancedSquelch(sample_rate)
@@ -958,66 +959,28 @@ class EnhancedRxListenWorker(Worker):
         self.recording_filepath = os.path.join("/tmp", filename)
         self.recording_start_time = datetime.datetime.now()
 
-        # Record raw audio first, then process
-        command = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "alsa",
-            "-i",
-            self.audio_device,  # Use the tested/detected audio device
-            "-ac",
-            "1",
-            "-ar",
-            str(self.sample_rate),
-            "-c:a",
-            "pcm_s16le",  # Raw PCM for processing
-            self.recording_filepath,
-        ]
+        # Initialize recording state first (before starting FFmpeg)
+        self.recording = True
+        self.silence_counter = 0
 
-        self.logger.debug(
-            f"Starting FFmpeg recording with command: {' '.join(command)}"
+        # Store pre-record filepath for later merging
+        self.pre_record_filepath = (
+            pre_record_filepath if os.path.exists(pre_record_filepath) else None
         )
 
-        try:
-            self.process = subprocess.Popen(
-                command, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True
+        # Use a different approach: instead of starting a separate FFmpeg process,
+        # we'll collect the audio data from the streaming process and save it
+        # This avoids the audio device conflict issue
+        self.recording_buffer = []  # Buffer to collect audio chunks during recording
+
+        self.bus.publish(RxRecordingStartedEvent())
+        self.logger.info(
+            f"Enhanced recording started (streaming mode): {self.recording_filepath}"
+        )
+        if self.pre_record_filepath:
+            self.logger.info(
+                f"Pre-record buffer will be merged: {self.pre_record_filepath}"
             )
-
-            # Give FFmpeg a moment to initialize
-            time.sleep(0.1)
-
-            # Check if process is still running (didn't fail immediately)
-            if self.process.poll() is not None:
-                # Process has already terminated
-                _, stderr = self.process.communicate()
-                self.logger.error(f"FFmpeg failed to start recording: {stderr}")
-                self.recording = False
-                # Clean up pre-record file if recording failed
-                if os.path.exists(pre_record_filepath):
-                    os.remove(pre_record_filepath)
-                return
-
-            self.recording = True
-            self.silence_counter = 0
-
-            # Store pre-record filepath for later merging
-            self.pre_record_filepath = (
-                pre_record_filepath if os.path.exists(pre_record_filepath) else None
-            )
-
-            self.bus.publish(RxRecordingStartedEvent())
-            self.logger.info(f"Enhanced recording started: {self.recording_filepath}")
-            if self.pre_record_filepath:
-                self.logger.info(
-                    f"Pre-record buffer will be merged: {self.pre_record_filepath}"
-                )
-        except Exception as e:
-            self.logger.error(f"Failed to start recording: {e}")
-            self.recording = False
-            # Clean up pre-record file if recording failed
-            if os.path.exists(pre_record_filepath):
-                os.remove(pre_record_filepath)
 
     def stop_recording(self):
         """Stop recording and apply advanced processing."""
@@ -1031,30 +994,28 @@ class EnhancedRxListenWorker(Worker):
 
         self.logger.info(f"Stopping recording after {recording_duration:.3f}s")
 
-        # Stop ffmpeg process
-        if self.process:
+        # Save the collected audio data to file
+        if hasattr(self, "recording_buffer") and self.recording_buffer:
             try:
-                self.process.terminate()
-                _, stderr = self.process.communicate(timeout=5.0)
-                if stderr and self.process.returncode != 0:
-                    self.logger.error(f"FFmpeg recording error: {stderr}")
-            except subprocess.TimeoutExpired:
-                self.logger.warning("FFmpeg process termination timeout, force killing")
-                self.process.kill()
-                try:
-                    _, stderr = self.process.communicate(timeout=2.0)
-                    if stderr:
-                        self.logger.error(f"FFmpeg recording error (killed): {stderr}")
-                except subprocess.TimeoutExpired:
-                    self.logger.error("FFmpeg process could not be killed")
-            finally:
-                self.process = None
+                # Combine all recorded chunks
+                combined_data = np.concatenate(self.recording_buffer)
+                # Save as WAV file
+                wavfile.write(self.recording_filepath, self.sample_rate, combined_data)
+                self.logger.info(
+                    f"Saved {len(combined_data)} samples to {self.recording_filepath}"
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to save recording buffer: {e}")
+                self.recording = False
+                self.silence_counter = 0
+                self.bus.publish(RxRecordingEndedEvent())
+                return
 
         self.recording = False
         self.silence_counter = 0  # Reset silence counter
         self.bus.publish(RxRecordingEndedEvent())
 
-        # Give FFmpeg a moment to finalize the file
+        # Give a moment for file operations to complete
         time.sleep(0.1)
 
         # Check if recording file actually exists
@@ -1281,6 +1242,10 @@ class EnhancedRxListenWorker(Worker):
             if not self.recording:
                 self._add_to_pre_record_buffer(audio_chunk)
 
+            # If recording, collect audio data
+            if self.recording and hasattr(self, "recording_buffer"):
+                self.recording_buffer.append(audio_chunk.copy())
+
             # Call squelch processing directly (synchronously) for immediate response
             # This bypasses the @cpu_intensive threading to eliminate latency
             squelch_open, stats = self._immediate_squelch_process(audio_chunk)
@@ -1329,13 +1294,6 @@ class EnhancedRxListenWorker(Worker):
                         )
                         self.stop_recording()
 
-                    # Check if FFmpeg process is still alive
-                    if self.process and self.process.poll() is not None:
-                        self.logger.error(
-                            "FFmpeg recording process died unexpectedly, stopping recording"
-                        )
-                        self.stop_recording()
-
             # Track processing performance
             process_time = time.time() - start_time
             self.chunk_process_times.append(process_time)
@@ -1379,21 +1337,15 @@ class EnhancedRxListenWorker(Worker):
                         self.stop_recording()
                         return
 
-                # Check FFmpeg recording process health
-                if self.process and self.process.poll() is not None:
-                    self.logger.error(
-                        "Periodic check: FFmpeg recording process died, stopping recording"
-                    )
-                    self.stop_recording()
-                    return
-
                 # Log recording status
                 if self.recording_start_time:
                     recording_duration = (
                         datetime.datetime.now() - self.recording_start_time
                     ).total_seconds()
+                    buffer_size = len(getattr(self, "recording_buffer", []))
                     self.logger.debug(
-                        f"Recording health check: {recording_duration:.1f}s/{self.max_recording_duration:.0f}s, silence_counter: {self.silence_counter}"
+                        f"Recording health check: {recording_duration:.1f}s/{self.max_recording_duration:.0f}s, "
+                        f"silence_counter: {self.silence_counter}, buffer_chunks: {buffer_size}"
                     )
 
             # Check audio streaming process health (runs even when not recording)
