@@ -69,10 +69,8 @@ sudo apt install ffmpeg python3-venv python3-dev build-essential
 > Note:
 > `pyaudioop` was disconutinued in python3.13 so audioop-lts package is used.
 
-    python3 -m venv ./venv
+    uv sync
     source ./venv/bin/activate
-    pip3 install -r requirements.txt
-
     python3 ./radiotelegram/main.py
 
 ## tuning (required)
