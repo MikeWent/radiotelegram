@@ -1,0 +1,12 @@
+[project]
+name = "radiotelegram"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.3.2",
+    "pytelegrambotapi>=4.28.0",
+    "python-dotenv>=1.1.1",
+    "scipy>=1.16.0",
+]

@@ -1,5 +1,7 @@
-import asyncio
 import os
+import subprocess
+import threading
+import time
 from typing import Optional
 
 from radiotelegram.bus import MessageBus, Worker, cpu_intensive
@@ -36,41 +38,41 @@ class EnhancedTxPlayWorker(Worker):
         self.compressor_ratio = 3.0  # Compression ratio
         self.noise_reduction_amount = 8  # dB of noise reduction
 
-    async def on_recording_started(self, event: RxRecordingStartedEvent):
+    def on_recording_started(self, event: RxRecordingStartedEvent):
         """Disable playback when recording starts to prevent interference."""
         self.enabled = False
         self.logger.debug("TX disabled - RX recording started")
 
-    async def on_recording_finished(self, event: RxRecordingEndedEvent):
+    def on_recording_finished(self, event: RxRecordingEndedEvent):
         """Enable playback when recording ends."""
         self.enabled = True
         self.logger.debug("TX enabled - RX recording ended")
 
-    async def handle_event(self, event: TelegramVoiceMessageDownloadedEvent):
+    def handle_event(self, event: TelegramVoiceMessageDownloadedEvent):
         """Handle incoming voice message for transmission."""
         if not self.enabled:
             self.logger.info(f"TX disabled, queuing message: {event.filepath}")
             # Re-queue the event to try later
-            await asyncio.sleep(1.0)
-            await self.queue_event(event)
+            time.sleep(1.0)
+            self.queue_event(event)
             return
 
         self.logger.info(f"Processing voice message for TX: {event.filepath}")
-        await self.bus.publish(TxMessagePlaybackStartedEvent())
+        self.bus.publish(TxMessagePlaybackStartedEvent())
 
         try:
-            await self.play_enhanced_audio(event.filepath)
+            self.play_enhanced_audio(event.filepath)
         except Exception as e:
             self.logger.error(f"Error during enhanced playback: {e}")
         finally:
-            await asyncio.sleep(self.post_tx_delay)
-            await self.bus.publish(TxMessagePlaybackEndedEvent())
+            time.sleep(self.post_tx_delay)
+            self.bus.publish(TxMessagePlaybackEndedEvent())
 
-    async def play_enhanced_audio(self, filepath: str):
+    def play_enhanced_audio(self, filepath: str):
         """Play audio with enhanced processing optimized for radio transmission."""
 
         # Step 1: Pre-process the audio for radio transmission
-        processed_filepath = await self._preprocess_for_radio(filepath)
+        processed_filepath = self._preprocess_for_radio(filepath)
 
         if not processed_filepath:
             self.logger.error("Failed to preprocess audio")
@@ -78,13 +80,13 @@ class EnhancedTxPlayWorker(Worker):
 
         try:
             # Step 2: Generate wake tone to activate radio TX
-            await self._play_wake_tone()
+            self._play_wake_tone()
 
             # Step 3: Small delay for radio to fully key up
-            await asyncio.sleep(0.2)
+            time.sleep(0.2)
 
             # Step 4: Play the processed audio
-            await self._play_audio_file(processed_filepath)
+            self._play_audio_file(processed_filepath)
 
         finally:
             # Clean up processed file
@@ -95,7 +97,7 @@ class EnhancedTxPlayWorker(Worker):
                 os.remove(filepath)
 
     @cpu_intensive
-    async def _preprocess_for_radio(self, input_filepath: str) -> Optional[str]:
+    def _preprocess_for_radio(self, input_filepath: str) -> Optional[str]:
         """
         Apply comprehensive audio processing optimized for radio transmission.
 
@@ -145,32 +147,31 @@ class EnhancedTxPlayWorker(Worker):
 
             self.logger.debug(f"Preprocessing audio with command: {' '.join(command)}")
 
-            result = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
             )
-
-            _, stderr = await result.communicate()
 
             if result.returncode == 0:
                 self.logger.debug("Audio preprocessing completed successfully")
                 return processed_filepath
             else:
-                self.logger.error(f"FFmpeg preprocessing failed: {stderr.decode()}")
+                self.logger.error(f"FFmpeg preprocessing failed: {result.stderr}")
                 return None
 
         except Exception as e:
             self.logger.error(f"Error in audio preprocessing: {e}")
             return None
 
-    async def _play_wake_tone(self):
+    def _play_wake_tone(self):
         """Play a wake-up tone to activate radio PTT reliably."""
-        process = None
         try:
-            with open("/dev/null", "w") as devnull:
-                # Generate and play wake tone
-                process = await asyncio.create_subprocess_exec(
+            # Generate and play wake tone
+            process = subprocess.Popen(
+                [
                     "ffplay",
                     "-nodisp",
                     "-autoexit",
@@ -180,33 +181,33 @@ class EnhancedTxPlayWorker(Worker):
                     "lavfi",
                     "-i",
                     f"sine=frequency={self.wake_tone_frequency}:duration={self.wake_tone_duration}",
-                    stdout=devnull,
-                    stderr=devnull,
-                )
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
-                await asyncio.wait_for(
-                    process.wait(), timeout=self.wake_tone_duration + 1.0
-                )
+            try:
+                process.wait(timeout=self.wake_tone_duration + 1.0)
                 self.logger.debug(
                     f"Wake tone played: {self.wake_tone_frequency}Hz for {self.wake_tone_duration}s"
                 )
-
-        except asyncio.TimeoutError:
-            self.logger.warning("Wake tone playback timeout")
-            if process:
+            except subprocess.TimeoutExpired:
+                self.logger.warning("Wake tone playback timeout")
                 try:
                     process.terminate()
-                    await process.wait()
-                except:
-                    pass
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
         except Exception as e:
             self.logger.error(f"Error playing wake tone: {e}")
 
-    async def _play_audio_file(self, filepath: str):
+    def _play_audio_file(self, filepath: str):
         """Play processed audio file with timeout protection."""
         try:
-            with open("/dev/null", "w") as devnull:
-                process = await asyncio.create_subprocess_exec(
+            process = subprocess.Popen(
+                [
                     "ffplay",
                     "-nodisp",
                     "-autoexit",
@@ -215,26 +216,32 @@ class EnhancedTxPlayWorker(Worker):
                     "-af",
                     "volume=0.8",  # Slight volume reduction for safety
                     filepath,
-                    stdout=devnull,
-                    stderr=devnull,
-                )
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
+            try:
+                process.wait(timeout=self.timeout_seconds)
+                self.logger.debug(f"Audio playback completed: {filepath}")
+            except subprocess.TimeoutExpired:
+                self.logger.warning(f"Playback timeout for {filepath}, terminating")
+                process.terminate()
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=self.timeout_seconds)
-                    self.logger.debug(f"Audio playback completed: {filepath}")
-                except asyncio.TimeoutError:
-                    self.logger.warning(f"Playback timeout for {filepath}, terminating")
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=5.0)
-                    except asyncio.TimeoutError:
-                        self.logger.warning("Force killing playback process")
-                        process.kill()
-                        await process.wait()
+                    process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    self.logger.warning("Force killing playback process")
+                    process.kill()
+                    process.wait()
 
         except Exception as e:
             self.logger.error(f"Error playing audio file {filepath}: {e}")
 
-    async def start(self):
+    def start(self):
         """Start processing the queue."""
-        asyncio.create_task(self.process_queue())
+        # Start the queue processing thread
+        self._processing_thread = threading.Thread(
+            target=self.process_queue, name=f"{self.__class__.__name__}ProcessingThread"
+        )
+        self._processing_thread.daemon = True
+        self._processing_thread.start()

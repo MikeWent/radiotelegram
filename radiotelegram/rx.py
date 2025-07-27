@@ -1,4 +1,3 @@
-import asyncio
 import datetime
 import os
 import queue
@@ -559,13 +558,12 @@ class EnhancedRxListenWorker(Worker):
         # Audio streaming process monitoring
         self.streaming_process = None  # Track the streaming FFmpeg process
         self.last_chunk_time = 0  # Track when we last received audio data
-        self.streaming_timeout = 10.0  # Seconds without audio before considering stream dead
+        self.streaming_timeout = (
+            10.0  # Seconds without audio before considering stream dead
+        )
 
-        # Store the event loop for thread-safe async operations
-        try:
-            self.event_loop = asyncio.get_event_loop()
-        except RuntimeError:
-            self.event_loop = None
+        # Store reference for thread management
+        self._processing_thread = None
 
         # Event subscriptions
         self.bus.subscribe(TxMessagePlaybackStartedEvent, self.on_playback_started)
@@ -574,19 +572,24 @@ class EnhancedRxListenWorker(Worker):
         # Test audio device availability at startup
         self._test_audio_device()
 
-    async def on_playback_started(self, event: TxMessagePlaybackStartedEvent):
+    def on_playback_started(self, event: TxMessagePlaybackStartedEvent):
         """Disable listening during playback to prevent feedback."""
         self.enabled = False
         if self.recording:
             self.logger.info("Stopping recording due to TX playback starting")
             self.stop_recording()
 
-    async def on_playback_finished(self, event: TxMessagePlaybackEndedEvent):
+    def on_playback_finished(self, event: TxMessagePlaybackEndedEvent):
         """Re-enable listening after playback ends."""
         self.enabled = True
         # Restart audio stream processing
         self.logger.info("TX playback finished, restarting audio stream processing")
-        asyncio.create_task(asyncio.to_thread(self.process_audio_stream))
+        # Start audio processing in a new thread
+        processing_thread = threading.Thread(
+            target=self.process_audio_stream, name="AudioProcessingThread"
+        )
+        processing_thread.daemon = True
+        processing_thread.start()
 
     def _test_audio_device(self):
         """Test audio device availability and log diagnostics."""
@@ -920,15 +923,23 @@ class EnhancedRxListenWorker(Worker):
         if self.recording:
             # Check if we have a stale recording state
             if self.recording_start_time:
-                stale_duration = (datetime.datetime.now() - self.recording_start_time).total_seconds()
+                stale_duration = (
+                    datetime.datetime.now() - self.recording_start_time
+                ).total_seconds()
                 if stale_duration > self.max_recording_duration:
-                    self.logger.warning(f"Detected stale recording state ({stale_duration:.1f}s), cleaning up")
+                    self.logger.warning(
+                        f"Detected stale recording state ({stale_duration:.1f}s), cleaning up"
+                    )
                     self.stop_recording()
                 else:
-                    self.logger.debug("Recording already in progress, ignoring start request")
+                    self.logger.debug(
+                        "Recording already in progress, ignoring start request"
+                    )
                     return
             else:
-                self.logger.warning("Recording flag set but no start time, resetting state")
+                self.logger.warning(
+                    "Recording flag set but no start time, resetting state"
+                )
                 self.recording = False
 
         os.makedirs("/tmp", exist_ok=True)
@@ -995,7 +1006,7 @@ class EnhancedRxListenWorker(Worker):
                 pre_record_filepath if os.path.exists(pre_record_filepath) else None
             )
 
-            asyncio.run(self.bus.publish(RxRecordingStartedEvent()))
+            self.bus.publish(RxRecordingStartedEvent())
             self.logger.info(f"Enhanced recording started: {self.recording_filepath}")
             if self.pre_record_filepath:
                 self.logger.info(
@@ -1017,7 +1028,7 @@ class EnhancedRxListenWorker(Worker):
         recording_duration = (
             datetime.datetime.now() - self.recording_start_time
         ).total_seconds()
-        
+
         self.logger.info(f"Stopping recording after {recording_duration:.3f}s")
 
         # Stop ffmpeg process
@@ -1041,7 +1052,7 @@ class EnhancedRxListenWorker(Worker):
 
         self.recording = False
         self.silence_counter = 0  # Reset silence counter
-        asyncio.run(self.bus.publish(RxRecordingEndedEvent()))
+        self.bus.publish(RxRecordingEndedEvent())
 
         # Give FFmpeg a moment to finalize the file
         time.sleep(0.1)
@@ -1070,7 +1081,9 @@ class EnhancedRxListenWorker(Worker):
         # Calculate trimmed duration
         trimmed_duration = max(0, recording_duration - self.silence_duration)
 
-        self.logger.info(f"Recording stopped - Duration: {recording_duration:.3f}s, Trimmed: {trimmed_duration:.3f}s, Min required: {self.minimal_recording_duration:.3f}s")
+        self.logger.info(
+            f"Recording stopped - Duration: {recording_duration:.3f}s, Trimmed: {trimmed_duration:.3f}s, Min required: {self.minimal_recording_duration:.3f}s"
+        )
 
         if trimmed_duration > self.minimal_recording_duration:
             self._process_recording(trimmed_duration)
@@ -1225,10 +1238,8 @@ class EnhancedRxListenWorker(Worker):
 
                 if is_voice:
                     # Voice detected - publish the processed recording
-                    asyncio.run(
-                        self.bus.publish(
-                            RxRecordingCompleteEvent(filepath=processed_filepath)
-                        )
+                    self.bus.publish(
+                        RxRecordingCompleteEvent(filepath=processed_filepath)
                     )
                     self.logger.info(
                         f"Voice recording completed and sent: {processed_filepath}"
@@ -1294,8 +1305,10 @@ class EnhancedRxListenWorker(Worker):
                     chunks_for_silence = self.silence_duration * (
                         self.sample_rate / self.chunk_size
                     )
-                    
-                    self.logger.debug(f"Silence counter: {self.silence_counter}/{chunks_for_silence:.0f}")
+
+                    self.logger.debug(
+                        f"Silence counter: {self.silence_counter}/{chunks_for_silence:.0f}"
+                    )
 
                     if self.silence_counter >= chunks_for_silence:
                         self.logger.info("Stopping recording due to silence timeout")
@@ -1303,20 +1316,24 @@ class EnhancedRxListenWorker(Worker):
             else:
                 # Squelch is open and recording
                 self.silence_counter = 0
-                
+
                 # Check for recording timeout
                 if self.recording and self.recording_start_time:
                     recording_duration = (
                         datetime.datetime.now() - self.recording_start_time
                     ).total_seconds()
-                    
+
                     if recording_duration > self.max_recording_duration:
-                        self.logger.warning(f"Recording timeout after {recording_duration:.1f}s, force stopping")
+                        self.logger.warning(
+                            f"Recording timeout after {recording_duration:.1f}s, force stopping"
+                        )
                         self.stop_recording()
-                    
+
                     # Check if FFmpeg process is still alive
                     if self.process and self.process.poll() is not None:
-                        self.logger.error("FFmpeg recording process died unexpectedly, stopping recording")
+                        self.logger.error(
+                            "FFmpeg recording process died unexpectedly, stopping recording"
+                        )
                         self.stop_recording()
 
             # Track processing performance
@@ -1325,11 +1342,8 @@ class EnhancedRxListenWorker(Worker):
             if len(self.chunk_process_times) > self.max_process_time_samples:
                 self.chunk_process_times.pop(0)
 
-            # Schedule statistics publishing asynchronously (non-blocking)
-            if (
-                current_time - self.last_stats_publish_time >= self.stats_interval
-                and self.event_loop
-            ):
+            # Schedule statistics publishing in the bus
+            if current_time - self.last_stats_publish_time >= self.stats_interval:
                 # Add performance stats
                 avg_process_time = sum(self.chunk_process_times) / len(
                     self.chunk_process_times
@@ -1341,10 +1355,8 @@ class EnhancedRxListenWorker(Worker):
                 # Periodic health check for recording
                 self._periodic_recording_health_check()
 
-                # Use the stored event loop reference for thread-safe async operations
-                asyncio.run_coroutine_threadsafe(
-                    self._publish_enhanced_stats(stats), self.event_loop
-                )
+                # Publish stats directly (no async needed)
+                self._publish_enhanced_stats(stats)
                 self.last_stats_publish_time = current_time
 
         except Exception as e:
@@ -1359,42 +1371,54 @@ class EnhancedRxListenWorker(Worker):
                     recording_duration = (
                         datetime.datetime.now() - self.recording_start_time
                     ).total_seconds()
-                    
+
                     if recording_duration > self.max_recording_duration:
-                        self.logger.warning(f"Periodic check: Recording timeout after {recording_duration:.1f}s, force stopping")
+                        self.logger.warning(
+                            f"Periodic check: Recording timeout after {recording_duration:.1f}s, force stopping"
+                        )
                         self.stop_recording()
                         return
-                
+
                 # Check FFmpeg recording process health
                 if self.process and self.process.poll() is not None:
-                    self.logger.error("Periodic check: FFmpeg recording process died, stopping recording")
+                    self.logger.error(
+                        "Periodic check: FFmpeg recording process died, stopping recording"
+                    )
                     self.stop_recording()
                     return
-                    
+
                 # Log recording status
                 if self.recording_start_time:
                     recording_duration = (
                         datetime.datetime.now() - self.recording_start_time
                     ).total_seconds()
-                    self.logger.debug(f"Recording health check: {recording_duration:.1f}s/{self.max_recording_duration:.0f}s, silence_counter: {self.silence_counter}")
-            
+                    self.logger.debug(
+                        f"Recording health check: {recording_duration:.1f}s/{self.max_recording_duration:.0f}s, silence_counter: {self.silence_counter}"
+                    )
+
             # Check audio streaming process health (runs even when not recording)
             if self.streaming_process:
                 if self.streaming_process.poll() is not None:
                     self.logger.error("Periodic check: FFmpeg streaming process died")
                     # Don't try to restart here, let the main loop handle it
                     return
-                
+
                 # Check if we're receiving audio data
                 current_time = time.time()
-                if self.last_chunk_time > 0:  # Only check if we've received at least one chunk
+                if (
+                    self.last_chunk_time > 0
+                ):  # Only check if we've received at least one chunk
                     time_since_last_chunk = current_time - self.last_chunk_time
                     if time_since_last_chunk > self.streaming_timeout:
-                        self.logger.warning(f"No audio data received for {time_since_last_chunk:.1f}s, streaming may be hung")
+                        self.logger.warning(
+                            f"No audio data received for {time_since_last_chunk:.1f}s, streaming may be hung"
+                        )
                         # Log additional debug info
                         if self.streaming_process:
-                            self.logger.warning(f"Streaming process PID: {self.streaming_process.pid}, poll: {self.streaming_process.poll()}")
-                
+                            self.logger.warning(
+                                f"Streaming process PID: {self.streaming_process.pid}, poll: {self.streaming_process.poll()}"
+                            )
+
         except Exception as e:
             self.logger.error(f"Error in periodic recording health check: {e}")
 
@@ -1543,8 +1567,10 @@ class EnhancedRxListenWorker(Worker):
                     chunks_for_silence = self.silence_duration * (
                         self.sample_rate / self.chunk_size
                     )
-                    
-                    self.logger.debug(f"Silence counter: {self.silence_counter}/{chunks_for_silence:.0f}")
+
+                    self.logger.debug(
+                        f"Silence counter: {self.silence_counter}/{chunks_for_silence:.0f}"
+                    )
 
                     if self.silence_counter >= chunks_for_silence:
                         self.logger.info("Stopping recording due to silence timeout")
@@ -1552,34 +1578,33 @@ class EnhancedRxListenWorker(Worker):
             else:
                 # Squelch is open and recording
                 self.silence_counter = 0
-                
+
                 # Check for recording timeout and FFmpeg health
                 if self.recording and self.recording_start_time:
                     recording_duration = (
                         datetime.datetime.now() - self.recording_start_time
                     ).total_seconds()
-                    
+
                     if recording_duration > self.max_recording_duration:
-                        self.logger.warning(f"Recording timeout after {recording_duration:.1f}s, force stopping")
-                        self.stop_recording()
-                    
-                    # Check if FFmpeg process is still alive
-                    if self.process and self.process.poll() is not None:
-                        self.logger.error("FFmpeg recording process died unexpectedly, stopping recording")
+                        self.logger.warning(
+                            f"Recording timeout after {recording_duration:.1f}s, force stopping"
+                        )
                         self.stop_recording()
 
-            # Schedule statistics publishing asynchronously
-            if (
-                current_time - self.last_stats_publish_time >= self.stats_interval
-                and self.event_loop
-            ):
+                    # Check if FFmpeg process is still alive
+                    if self.process and self.process.poll() is not None:
+                        self.logger.error(
+                            "FFmpeg recording process died unexpectedly, stopping recording"
+                        )
+                        self.stop_recording()
+
+            # Schedule statistics publishing in the bus
+            if current_time - self.last_stats_publish_time >= self.stats_interval:
                 # Periodic health check for recording
                 self._periodic_recording_health_check()
-                
-                # Use the stored event loop reference for thread-safe async operations
-                asyncio.run_coroutine_threadsafe(
-                    self._publish_enhanced_stats(stats), self.event_loop
-                )
+
+                # Publish stats directly (no async needed)
+                self._publish_enhanced_stats(stats)
                 self.last_stats_publish_time = current_time
 
         except Exception as e:
@@ -1714,12 +1739,18 @@ class EnhancedRxListenWorker(Worker):
                     if not self.enabled:
                         self.logger.info("Audio processing disabled, stopping stream")
                         return successful_chunks >= min_successful_chunks
-                    
+
                     # Periodic safety check for recording timeout
                     if self.recording and self.recording_start_time:
-                        recording_duration = (datetime.datetime.now() - self.recording_start_time).total_seconds()
-                        if recording_duration > self.max_recording_duration * 1.5:  # 1.5x timeout for emergency stop
-                            self.logger.error(f"Emergency stop: recording has been running for {recording_duration:.1f}s")
+                        recording_duration = (
+                            datetime.datetime.now() - self.recording_start_time
+                        ).total_seconds()
+                        if (
+                            recording_duration > self.max_recording_duration * 1.5
+                        ):  # 1.5x timeout for emergency stop
+                            self.logger.error(
+                                f"Emergency stop: recording has been running for {recording_duration:.1f}s"
+                            )
                             self.stop_recording()
 
                     try:
@@ -1805,9 +1836,9 @@ class EnhancedRxListenWorker(Worker):
             self.streaming_process = None
             self.logger.info("Audio stream processing stopped")
 
-    async def _publish_enhanced_stats(self, stats: dict):
+    def _publish_enhanced_stats(self, stats: dict):
         """Publish enhanced statistics including spectral analysis and performance metrics."""
-        await self.bus.publish(
+        self.bus.publish(
             RxNoiseFloorStatsEvent(
                 ambient_db=float(stats["noise_floor_db"]),
                 current_db=float(stats["current_db"]),
@@ -1832,15 +1863,18 @@ class EnhancedRxListenWorker(Worker):
             f"{performance_info}"
         )
 
-    async def start(self):
+    def start(self):
         """Start the enhanced audio processing worker."""
         self.logger.info("Enhanced RxListenWorker starting...")
 
         # Start the main audio stream processing in a separate thread
-        # This allows the sync FFmpeg reading loop to run without blocking the async loop
-        asyncio.create_task(asyncio.to_thread(self.process_audio_stream))
+        # This allows the sync FFmpeg reading loop to run without blocking
+        self.audio_thread = threading.Thread(
+            target=self.process_audio_stream, daemon=True
+        )
+        self.audio_thread.start()
 
-    async def stop(self):
+    def stop(self):
         """Stop the audio processing worker and clean up resources."""
         self.logger.info("Stopping Enhanced RxListenWorker...")
 
@@ -1857,7 +1891,9 @@ class EnhancedRxListenWorker(Worker):
                 self.streaming_process.terminate()
                 self.streaming_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.logger.warning("Streaming FFmpeg termination timeout, force killing")
+                self.logger.warning(
+                    "Streaming FFmpeg termination timeout, force killing"
+                )
                 self.streaming_process.kill()
                 try:
                     self.streaming_process.wait(timeout=2)
@@ -1876,12 +1912,12 @@ class RXListenPrintStatsWorker(Worker):
         super().__init__(bus)
         self.bus.subscribe(RxNoiseFloorStatsEvent, self.handle_noise_floor_stats)
 
-    async def handle_noise_floor_stats(self, event: RxNoiseFloorStatsEvent):
+    def handle_noise_floor_stats(self, event: RxNoiseFloorStatsEvent):
         # Print or log the noise floor statistics.
         self.logger.info(
             f"Ambient: {event.ambient_db:.2f} dB, Current: {event.current_db:.2f} dB, Delta: {event.delta_db:.2f} dB"
         )
 
-    async def start(self):
+    def start(self):
         while True:
-            await asyncio.sleep(1)
+            time.sleep(1)

@@ -1,6 +1,7 @@
-import asyncio
 import functools
 import logging
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -10,31 +11,10 @@ from typing import Callable, Deque, Dict, List, Type
 def cpu_intensive(func):
     """
     Decorator to mark a handler as CPU-intensive.
-    These handlers will be executed in a thread pool even if they're async.
+    These handlers will be executed in a thread pool.
     """
-    if asyncio.iscoroutinefunction(func):
-
-        @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            loop = asyncio.get_event_loop()
-
-            # For async functions, we create a sync wrapper that runs the async function
-            def sync_runner():
-                # Create a new event loop for this thread
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    return new_loop.run_until_complete(func(*args, **kwargs))
-                finally:
-                    new_loop.close()
-
-            return await loop.run_in_executor(None, sync_runner)
-
-        async_wrapper._cpu_intensive = True
-        return async_wrapper
-    else:
-        func._cpu_intensive = True
-        return func
+    func._cpu_intensive = True
+    return func
 
 
 # Message Bus
@@ -46,42 +26,38 @@ class MessageBus:
             max_workers=max_workers, thread_name_prefix="MessageBus"
         )
         self._shutdown = False
+        self._lock = threading.Lock()
 
     def subscribe(self, event_type: Type, handler: Callable):
-        if event_type not in self.subscribers:
-            self.subscribers[event_type] = []
-        self.subscribers[event_type].append(handler)
+        with self._lock:
+            if event_type not in self.subscribers:
+                self.subscribers[event_type] = []
+            self.subscribers[event_type].append(handler)
 
-    async def publish(self, event):
-        """Publish an event to all subscribers, processing each concurrently."""
+    def publish(self, event):
+        """Publish an event to all subscribers, processing each in a separate thread."""
         self.logger.info(f"Publishing event: {event}")
         event_type = type(event)
 
-        if event_type in self.subscribers:
-            # Create tasks for all handlers to run concurrently
-            tasks = []
-            for handler in self.subscribers[event_type]:
-                # Each handler runs as a separate task for concurrency
-                task = asyncio.create_task(self._run_handler_safely(handler, event))
-                tasks.append(task)
+        with self._lock:
+            if event_type in self.subscribers:
+                # Submit each handler to run in a separate thread for concurrency
+                futures = []
+                for handler in self.subscribers[event_type]:
+                    future = self.executor.submit(
+                        self._run_handler_safely, handler, event
+                    )
+                    futures.append(future)
 
-            if tasks:
-                # Wait for all handlers to complete
-                try:
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    # Log any exceptions that occurred
-                    for i, result in enumerate(results):
-                        if isinstance(result, Exception):
-                            handler_name = getattr(
-                                self.subscribers[event_type][i], "__name__", "unknown"
-                            )
-                            self.logger.error(
-                                f"Handler {handler_name} failed: {result}"
-                            )
-                except Exception as e:
-                    self.logger.error(f"Error in message handlers: {e}")
+                # Wait for all handlers to complete (optional)
+                # You can remove this if you want fire-and-forget behavior
+                for future in futures:
+                    try:
+                        future.result(timeout=30)  # 30-second timeout per handler
+                    except Exception as e:
+                        self.logger.error(f"Handler execution failed: {e}")
 
-    async def _run_handler_safely(self, handler: Callable, event):
+    def _run_handler_safely(self, handler: Callable, event):
         """Run a message handler safely with proper error handling."""
         try:
             if self._shutdown:
@@ -91,29 +67,18 @@ class MessageBus:
             is_cpu_intensive = getattr(handler, "_cpu_intensive", False)
 
             if is_cpu_intensive:
-                # Force CPU-intensive handlers to run in thread pool
-                loop = asyncio.get_event_loop()
-                if asyncio.iscoroutinefunction(handler):
-                    # For CPU-intensive async handlers, the decorator handles thread execution
-                    await handler(event)
-                else:
-                    # For CPU-intensive sync handlers, run in thread pool
-                    await loop.run_in_executor(self.executor, handler, event)
+                # CPU-intensive handlers run directly in the thread pool
+                handler(event)
             else:
-                # For regular handlers
-                if asyncio.iscoroutinefunction(handler):
-                    await handler(event)
-                else:
-                    # Run sync handlers in thread pool to avoid blocking
-                    loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(self.executor, handler, event)
+                # Regular handlers also run in thread pool for isolation
+                handler(event)
 
         except Exception as e:
             handler_name = getattr(handler, "__name__", str(handler))
             self.logger.error(f"Error in handler {handler_name}: {e}")
-            raise  # Re-raise so gather() can catch it
+            raise  # Re-raise so futures can catch it
 
-    async def shutdown(self):
+    def shutdown(self):
         """Shutdown the message bus and cleanup resources."""
         self.logger.info("Shutting down MessageBus...")
         self._shutdown = True
@@ -137,53 +102,56 @@ class Worker(ABC):
             max_workers=2, thread_name_prefix=f"Worker-{self.__class__.__name__}"
         )
         self._processing = False
+        self._processing_thread = None
+        self._stop_event = threading.Event()
 
-    async def queue_event(self, event):
+    def queue_event(self, event):
         """Add an event to the processing queue."""
         self.queue.append(event)
 
-    async def process_queue(self):
+    def process_queue(self):
         """Process events from the queue, each in a separate thread."""
         self._processing = True
 
-        while self._processing:
+        while self._processing and not self._stop_event.is_set():
             if self.enabled and self.queue:
-                event = self.queue.popleft()
-                # Process each event in a separate thread to prevent blocking
                 try:
-                    await self._handle_event_in_thread(event)
-                except Exception as e:
-                    self.logger.error(
-                        f"Error processing event {type(event).__name__}: {e}"
-                    )
-            else:
-                await asyncio.sleep(0.1)
+                    event = self.queue.popleft()
+                    # Process each event in a separate thread to prevent blocking
+                    future = self.executor.submit(self._handle_event_in_thread, event)
+                    # Optional: wait for completion or let it run in background
+                    try:
+                        future.result(timeout=30)  # 30-second timeout
+                    except Exception as e:
+                        self.logger.error(
+                            f"Error processing event {type(event).__name__}: {e}"
+                        )
+                except IndexError:
+                    # Queue is empty
+                    pass
 
-    async def _handle_event_in_thread(self, event):
-        """Handle an event in a separate thread."""
+            # Small sleep to prevent busy waiting
+            time.sleep(0.1)
+
+    def _handle_event_in_thread(self, event):
+        """Handle an event in the current thread."""
         try:
-            loop = asyncio.get_event_loop()
-
-            # Check if handle_event is a coroutine function
-            if asyncio.iscoroutinefunction(self.handle_event):
-                # For async handle_event, run it directly (it's already async)
-                await self.handle_event(event)
-            else:
-                # For sync handle_event, run it in thread pool
-                await loop.run_in_executor(self.executor, self.handle_event, event)
-
+            self.handle_event(event)
         except Exception as e:
             self.logger.error(f"Error in handle_event for {type(event).__name__}: {e}")
 
-    async def handle_event(self, event):
+    def handle_event(self, event):
         """Override this method to handle specific events."""
         pass
 
-    async def stop(self):
+    def stop(self):
         """Stop the worker and cleanup resources."""
         self.logger.info(f"Stopping {self.__class__.__name__}...")
         self._processing = False
-        self.enabled = False
+        self._stop_event.set()
+
+        if self._processing_thread and self._processing_thread.is_alive():
+            self._processing_thread.join(timeout=5)
 
         try:
             self.executor.shutdown(wait=True)
@@ -191,5 +159,6 @@ class Worker(ABC):
             self.logger.warning(f"Error shutting down worker executor: {e}")
 
     @abstractmethod
-    async def start(self):
+    def start(self):
+        """Start the worker. This method should start any necessary background threads."""
         pass

@@ -1,9 +1,10 @@
-import asyncio
 import logging
 import os
 import signal
+import threading
+import time
 
-from aiogram import Bot, Dispatcher
+import telebot
 from dotenv import load_dotenv
 
 from radiotelegram.bus import MessageBus
@@ -21,7 +22,7 @@ logging.basicConfig(
 )
 
 
-async def main():
+def main():
     load_dotenv()
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -33,8 +34,7 @@ async def main():
 
     # Create components
     bus = MessageBus(max_workers=6)  # Increase workers for better parallel processing
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    dp = Dispatcher()
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
     # Create workers
     audio_listener = EnhancedRxListenWorker(bus, audio_device=AUDIO_DEVICE)
@@ -42,13 +42,13 @@ async def main():
 
     # Create workers with optional topic_id handling
     message_fetcher = TelegramMessageFetchWorker(
-        bus, bot, dp, chat_id=CHAT_ID, topic_id=TOPIC_ID
+        bus, bot, chat_id=CHAT_ID, topic_id=TOPIC_ID
     )
     action_sender = SendChatActionWorker(
-        bus, bot, dp, chat_id=CHAT_ID, topic_id=TOPIC_ID
+        bus, bot, chat_id=CHAT_ID, topic_id=TOPIC_ID or 0
     )
     voice_uploader = VoiceMessageUploadWorker(
-        bus, bot, chat_id=CHAT_ID, topic_id=TOPIC_ID
+        bus, bot, chat_id=CHAT_ID, topic_id=TOPIC_ID or 0
     )
 
     # Store workers for cleanup
@@ -60,62 +60,81 @@ async def main():
         voice_uploader,
     ]
 
-    async def cleanup():
+    # Global flag to signal shutdown
+    shutdown_flag = threading.Event()
+
+    def cleanup():
         """Cleanup function for graceful shutdown."""
         logging.info("Shutdown signal received, cleaning up...")
+
+        # Set shutdown flag
+        shutdown_flag.set()
 
         # Stop all workers
         for worker in workers:
             try:
-                await worker.stop()
+                worker.stop()
             except Exception as e:
                 logging.warning(
                     f"Error stopping worker {worker.__class__.__name__}: {e}"
                 )
 
         # Shutdown message bus
-        await bus.shutdown()
+        bus.shutdown()
 
         logging.info("Cleanup complete")
 
+    def signal_handler(signum, frame):
+        """Handle shutdown signals."""
+        logging.info(f"Received signal {signum}, initiating shutdown...")
+        cleanup()
+
+    # Set up signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGHUP, signal_handler)
+
     try:
-        # Start all workers
-        asyncio.create_task(dp.start_polling(bot, handle_signals=False))
-        asyncio.create_task(audio_listener.start())
-        asyncio.create_task(action_sender.start())
-        asyncio.create_task(voice_uploader.start())
-        asyncio.create_task(message_fetcher.start())
-        asyncio.create_task(audio_player.start())
+        # Start all workers in separate threads
+        worker_threads = []
+        for worker in workers:
+            thread = threading.Thread(
+                target=worker.start, name=f"{worker.__class__.__name__}Thread"
+            )
+            thread.daemon = True
+            thread.start()
+            worker_threads.append(thread)
 
-        # Main loop
-        while True:
-            await asyncio.sleep(0.1)
+        # Start telegram bot polling in a separate thread
+        bot_thread = threading.Thread(
+            target=lambda: bot.infinity_polling(timeout=10, long_polling_timeout=5),
+            name="TelegramBotThread",
+        )
+        bot_thread.daemon = True
+        bot_thread.start()
 
-    except (KeyboardInterrupt, SystemExit):
-        await cleanup()
+        # Main loop - wait for shutdown signal
+        while not shutdown_flag.is_set():
+            try:
+                shutdown_flag.wait(timeout=1.0)
+            except KeyboardInterrupt:
+                break
+
+    except Exception as e:
+        logging.error(f"Error in main loop: {e}")
     finally:
-        # Ensure cleanup runs even if there's an unexpected exit
+        # Ensure cleanup runs
         try:
-            await cleanup()
-        except:
-            pass
+            cleanup()
+        except Exception as e:
+            logging.error(f"Error during cleanup: {e}")
 
 
 if __name__ == "__main__":
-
-    def handle_signal(signum, frame):
-        """Handle shutdown signals."""
-        logging.info(f"Received signal {signum}, initiating shutdown...")
-        os._exit(0)
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-    signal.signal(signal.SIGHUP, handle_signal)
-
     logging.info("radiotelegram is starting. copyleft 2025 mike_went.")
 
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt received")
     except SystemExit:

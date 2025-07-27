@@ -22,25 +22,27 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Install uv
+RUN pip install --no-cache-dir uv
+
+# Copy project files and install Python dependencies
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen
 
 # Create app directory and non-root user
 WORKDIR /app
-RUN groupadd -r appuser && useradd -r -g appuser -u 1000 appuser
+RUN groupadd -r appuser && useradd -r -g appuser -u 1000 appuser -m
 
 # Add user to audio group for audio device access
 RUN usermod -a -G audio appuser
 
+# Create directories for temporary files and recordings
+RUN mkdir -p /tmp/radiotelegram /app/recordings /run/user/1000 /home/appuser/.cache/uv && \
+    chown -R appuser:appuser /tmp/radiotelegram /app/recordings /run/user/1000 /home/appuser/.cache
+
 # Copy application code
 COPY --chown=appuser:appuser radiotelegram/ ./radiotelegram/
 COPY --chown=appuser:appuser README.md ./
-
-# Create directories for temporary files and recordings
-RUN mkdir -p /tmp/radiotelegram /app/recordings /run/user/1000 && \
-    chown -R appuser:appuser /tmp/radiotelegram /app/recordings /run/user/1000
 
 # Switch to non-root user
 USER appuser
@@ -51,4 +53,4 @@ ENV PYTHONUNBUFFERED=1
 ENV AUDIO_DEVICE=pulse
 
 # Default command
-CMD ["python", "-m", "radiotelegram.main"]
+CMD ["uv", "run", "python", "-m", "radiotelegram.main"]
