@@ -28,13 +28,13 @@ class EnhancedRxListenWorker(Worker):
     """Enhanced receiver worker with advanced audio processing."""
 
     def __init__(
-        self, bus: MessageBus, sample_rate=48000, chunk_size=256, audio_device="pulse"
+        self, bus: MessageBus, sample_rate=48000, chunk_size=256, audio_device="hw:1,0"
     ):
         super().__init__(bus)
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size  # Reduced default chunk size for lower latency
         self.audio_device = (
-            audio_device  # Default to pulse (PipeWire/PulseAudio compatible)
+            audio_device  # Default to USB audio device (hw:1,0)
         )
 
         # Recording parameters optimized for responsive squelch
@@ -134,20 +134,18 @@ class EnhancedRxListenWorker(Worker):
             self.logger.info(f"Audio device '{self.audio_device}' is working")
             return
 
-        # If default device fails, try other common device names
+        # If default device fails, try other ALSA hardware devices
         fallback_devices = [
-            "pulse",  # PulseAudio/PipeWire compatibility layer (try first)
-            "pipewire",  # Direct PipeWire access
-            "hw:0,0",
-            "plughw:0,0",
-            "hw:1,0",
-            "plughw:1,0",
-            "hw:2,0",
-            "plughw:2,0",  # Try more hardware devices
-            "hw:0",
-            "plughw:0",  # Simplified hardware references
-            "hw:1",
-            "plughw:1",
+            "hw:1,0",      # USB audio device (typical)
+            "plughw:1,0",  # USB audio with format conversion
+            "hw:0,0",      # Built-in audio
+            "plughw:0,0",  # Built-in audio with format conversion
+            "hw:2,0",      # Additional audio device
+            "plughw:2,0",  # Additional audio with format conversion
+            "hw:1",        # Simplified USB device reference
+            "plughw:1",    # Simplified USB device with format conversion
+            "hw:0",        # Simplified built-in reference
+            "plughw:0",    # Simplified built-in with format conversion
         ]
 
         for device in fallback_devices:

@@ -5,12 +5,9 @@ RUN apt-get update && apt-get install -y \
     # Audio libraries and tools
     ffmpeg \
     alsa-utils \
-    pulseaudio-utils \
-    pipewire-pulse \
-    pipewire-alsa \
     libasound2-dev \
-    libpulse-dev \
-    libpipewire-0.3-dev \
+    # USB device utilities
+    usbutils \
     # System utilities
     lsof \
     procps \
@@ -29,28 +26,20 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen
 
-# Create app directory and non-root user
+# Create app directory
 WORKDIR /app
-RUN groupadd -r appuser && useradd -r -g appuser -u 1000 appuser -m
-
-# Add user to audio group for audio device access
-RUN usermod -a -G audio appuser
 
 # Create directories for temporary files and recordings
-RUN mkdir -p /tmp/radiotelegram /app/recordings /run/user/1000 /home/appuser/.cache/uv && \
-    chown -R appuser:appuser /tmp/radiotelegram /app/recordings /run/user/1000 /home/appuser/.cache
+RUN mkdir -p /tmp/radiotelegram /app/recordings
 
 # Copy application code
-COPY --chown=appuser:appuser radiotelegram/ ./radiotelegram/
-COPY --chown=appuser:appuser README.md ./
-
-# Switch to non-root user
-USER appuser
+COPY radiotelegram/ ./radiotelegram/
+COPY README.md ./
 
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-ENV AUDIO_DEVICE=pulse
+ENV AUDIO_DEVICE=hw:1,0
 
 # Default command
 CMD ["uv", "run", "python", "-m", "radiotelegram.main"]
