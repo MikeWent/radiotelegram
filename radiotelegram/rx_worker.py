@@ -81,9 +81,11 @@ class EnhancedRxListenWorker(Worker):
         self.streaming_timeout = (
             10.0  # Seconds without audio before considering stream dead
         )
+        self.audio_processing_watchdog_timeout = 30.0  # Seconds without any activity before force restart
 
         # Store reference for thread management
         self._processing_thread = None
+        self._audio_thread = None  # Store audio thread reference for monitoring
 
         # Event subscriptions
         self.bus.subscribe(TxMessagePlaybackStartedEvent, self.on_playback_started)
@@ -922,8 +924,10 @@ class EnhancedRxListenWorker(Worker):
         """Enhanced audio stream processing with advanced squelch using FFmpeg streaming."""
         self.logger.info("Starting enhanced audio stream processing with FFmpeg")
 
-        max_retries = 3
-        retry_delay = 5.0  # seconds
+        max_retries = 5  # Increased retries for ALSA xrun recovery
+        retry_delay = 2.0  # Reduced delay for faster recovery
+        xrun_retry_count = 0
+        max_xrun_retries = 3  # Special handling for xrun errors
 
         for attempt in range(max_retries):
             if not self.enabled:
@@ -934,29 +938,105 @@ class EnhancedRxListenWorker(Worker):
                 f"Audio stream attempt {attempt + 1}/{max_retries} with device: {self.audio_device}"
             )
 
-            if self._process_audio_stream_once():
-                # Successful run, don't retry unless it fails again
+            success = self._process_audio_stream_once()
+            
+            if success:
+                # Successful run, reset xrun counter and don't retry unless it fails again
+                xrun_retry_count = 0
                 break
             else:
-                # Failed, try to find a different device for next attempt
+                # Check if this was an xrun-related failure
+                # (The _process_audio_stream_once method now returns True for xrun recovery)
                 if attempt < max_retries - 1:
                     self.logger.warning(
                         f"Audio stream failed, retrying in {retry_delay}s..."
                     )
                     time.sleep(retry_delay)
 
-                    # Try to find a working device for next attempt
-                    self._test_audio_device()
+                    # For ALSA xruns, try shorter retry delays
+                    if xrun_retry_count < max_xrun_retries:
+                        retry_delay = min(1.0, retry_delay)  # Shorter delay for xrun recovery
+                        xrun_retry_count += 1
+                    else:
+                        # Try to find a different device for next attempt
+                        self._test_audio_device()
+                        retry_delay = 5.0  # Longer delay when switching devices
                 else:
                     self.logger.error("All audio stream attempts failed")
 
+        # Final attempt to restart if all retries failed
+        if not self.enabled:
+            return
+            
+        self.logger.warning("Audio stream processing ended, will be restarted by main loop if needed")
+
+    def _audio_processing_watchdog(self):
+        """Monitor audio processing health and restart if necessary."""
+        self.logger.info("Audio processing watchdog started")
+        
+        last_watchdog_check = time.time()
+        
+        while self.enabled:
+            try:
+                current_time = time.time()
+                
+                # Check if we've received audio data recently
+                if self.last_chunk_time > 0:  # Only check if we've received at least one chunk
+                    time_since_last_chunk = current_time - self.last_chunk_time
+                    
+                    if time_since_last_chunk > self.audio_processing_watchdog_timeout:
+                        self.logger.error(
+                            f"Audio processing watchdog: No audio data for {time_since_last_chunk:.1f}s, "
+                            f"restarting audio processing"
+                        )
+                        
+                        # Force stop current streaming process
+                        if self.streaming_process and self.streaming_process.poll() is None:
+                            self.logger.warning("Watchdog: Force terminating hung FFmpeg process")
+                            try:
+                                self.streaming_process.kill()
+                                self.streaming_process.wait(timeout=2)
+                            except:
+                                pass
+                        
+                        # Reset last chunk time to prevent immediate re-trigger
+                        self.last_chunk_time = 0
+                        
+                        # Restart audio processing
+                        if self.enabled:
+                            self.logger.info("Watchdog: Restarting audio stream processing")
+                            self._audio_thread = threading.Thread(
+                                target=self.process_audio_stream, daemon=True, name="AudioStreamThread-Restart"
+                            )
+                            self._audio_thread.start()
+                
+                # Check if audio thread is still alive
+                if hasattr(self, '_audio_thread') and self._audio_thread and not self._audio_thread.is_alive():
+                    if self.enabled:
+                        self.logger.warning("Audio processing thread died, restarting")
+                        self._audio_thread = threading.Thread(
+                            target=self.process_audio_stream, daemon=True, name="AudioStreamThread-Restart"
+                        )
+                        self._audio_thread.start()
+                
+                # Sleep for a reasonable interval
+                time.sleep(5.0)
+                
+            except Exception as e:
+                self.logger.error(f"Error in audio processing watchdog: {e}")
+                time.sleep(10.0)  # Longer sleep on errors
+                
+        self.logger.info("Audio processing watchdog stopped")
+
     def _process_audio_stream_once(self) -> bool:
         """Single attempt at audio stream processing. Returns True if successful."""
-        # Use FFmpeg for streaming with minimal latency settings
+        # Use FFmpeg for streaming with improved ALSA buffer handling
         ffmpeg_cmd = [
             "ffmpeg",
             "-f",
             "alsa",
+            "-thread_queue_size",
+            "512",  # Increase thread queue size to prevent xruns (input option)
             "-i",
             self.audio_device,
             "-ac",
@@ -1035,26 +1115,40 @@ class EnhancedRxListenWorker(Worker):
                         # Check if FFmpeg process is still running
                         if process.poll() is not None:
                             # Process has terminated, try to get error info
-                            _, stderr = process.communicate()
+                            _, stderr = process.communicate(timeout=1)
                             error_msg = stderr.decode() if stderr else "Unknown error"
-                            self.logger.error(f"FFmpeg process terminated: {error_msg}")
-                            return successful_chunks >= min_successful_chunks
+                            
+                            # Check for specific ALSA buffer xrun errors
+                            if "ALSA buffer xrun" in error_msg or "xrun" in error_msg.lower():
+                                self.logger.warning(f"FFmpeg ALSA buffer xrun detected: {error_msg}")
+                                self.logger.info("ALSA buffer xrun is usually caused by system load or audio device issues")
+                                # Return True to allow retry with potentially different settings
+                                return successful_chunks >= 5  # Lower threshold for xrun recovery
+                            else:
+                                self.logger.error(f"FFmpeg process terminated: {error_msg}")
+                                return successful_chunks >= min_successful_chunks
 
                         # Use non-blocking read with select for immediate response
                         import select
 
-                        # Check if data is available for reading (timeout = 0.001s for immediate response)
-                        ready, _, _ = select.select([process.stdout], [], [], 0.001)
+                        # Check if data is available for reading (timeout = 0.01s for better stability)
+                        ready, _, _ = select.select([process.stdout], [], [], 0.01)
 
                         if not ready:
-                            # No data available, continue immediately (don't sleep)
+                            # No data available, add small delay to prevent CPU spinning
+                            time.sleep(0.001)
                             continue
 
                         # Read available data (may be less than chunk_bytes)
                         raw_data = process.stdout.read(chunk_bytes)
 
                         if not raw_data:
-                            # No data available, FFmpeg might have stopped
+                            # No data available, check if process is still alive
+                            if process.poll() is not None:
+                                self.logger.warning("FFmpeg process ended, no more data available")
+                                break
+                            # Add small delay to prevent tight loop
+                            time.sleep(0.001)
                             continue
 
                         # Add to buffer
@@ -1084,12 +1178,22 @@ class EnhancedRxListenWorker(Worker):
                                 # Still update chunk time even on processing errors
                                 self.last_chunk_time = time.time()
 
-                    except Exception as e:
-                        self.logger.error(f"Error reading audio chunk: {e}")
-                        # Don't sleep on errors, continue immediately
+                    except Exception as chunk_error:
+                        self.logger.error(f"Error reading audio chunk: {chunk_error}")
+                        # Add small delay on errors to prevent tight error loops
+                        time.sleep(0.01)
 
+            except KeyboardInterrupt:
+                self.logger.info("Audio stream processing interrupted by user")
+                return successful_chunks >= min_successful_chunks
+            except Exception as stream_error:
+                self.logger.error(f"Error in audio stream loop: {stream_error}")
+                return successful_chunks >= min_successful_chunks
             finally:
                 pass  # No async processing cleanup needed anymore
+
+            # If we exit the loop normally, consider it successful
+            return successful_chunks >= min_successful_chunks
 
         except Exception as e:
             self.logger.error(f"Fatal error in audio stream processing: {e}")
@@ -1160,10 +1264,16 @@ class EnhancedRxListenWorker(Worker):
 
         # Start the main audio stream processing in a separate thread
         # This allows the sync FFmpeg reading loop to run without blocking
-        self.audio_thread = threading.Thread(
-            target=self.process_audio_stream, daemon=True
+        self._audio_thread = threading.Thread(
+            target=self.process_audio_stream, daemon=True, name="AudioStreamThread"
         )
-        self.audio_thread.start()
+        self._audio_thread.start()
+        
+        # Start a watchdog thread to monitor audio processing health
+        self._watchdog_thread = threading.Thread(
+            target=self._audio_processing_watchdog, daemon=True, name="AudioWatchdogThread"
+        )
+        self._watchdog_thread.start()
 
     def stop(self):
         """Stop the audio processing worker and clean up resources."""
