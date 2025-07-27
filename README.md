@@ -50,18 +50,25 @@ Components:
 4. polarity is not that crucial, for voice it's ok both ways.
 
 
-## software
-
-### config
+## config
 1. copy `.env.example` to `.env`
 2. edit file: fill bot token, group id and topic id (if present).
 
-### run with docker
+## run with docker
 ```
 docker compose up
 ```
 
-### run manually
+## raspberry pi
+
+put these lines into `/boot/firmware/config.txt`
+
+    dtparam=audio=off
+    dtoverlay=vc4-kms-v3d,noaudio
+
+to disable internal & hdmi audiocard
+
+## run manually
 ```
 sudo apt install ffmpeg python3-venv python3-dev build-essential 
 ```
@@ -73,7 +80,7 @@ sudo apt install ffmpeg python3-venv python3-dev build-essential
     source ./venv/bin/activate
     python3 ./radiotelegram/main.py
 
-## tuning (required)
+## tuning (required for diy cards)
 
 1. put baofeng into VOX mode (1/10).
 2. adjust main volume knob so that audio doesn't clip (<100% volume).
