@@ -38,6 +38,10 @@ class EnhancedTxPlayWorker(Worker):
         self.compressor_ratio = 3.0  # Compression ratio
         self.noise_reduction_amount = 8  # dB of noise reduction
 
+        # Volume control
+        self.max_volume_enabled = True  # Enable automatic volume maximization
+        self.volume_control_device = "PCM"  # ALSA mixer control name
+
     def on_recording_started(self, event: RxRecordingStartedEvent):
         """Disable playback when recording starts to prevent interference."""
         self.enabled = False
@@ -71,7 +75,11 @@ class EnhancedTxPlayWorker(Worker):
     def play_enhanced_audio(self, filepath: str):
         """Play audio with enhanced processing optimized for radio transmission."""
 
-        # Step 1: Pre-process the audio for radio transmission
+        # Step 1: Set maximum volume
+        if self.max_volume_enabled:
+            self._set_max_volume()
+
+        # Step 2: Pre-process the audio for radio transmission
         processed_filepath = self._preprocess_for_radio(filepath)
 
         if not processed_filepath:
@@ -79,13 +87,13 @@ class EnhancedTxPlayWorker(Worker):
             return
 
         try:
-            # Step 2: Generate wake tone to activate radio TX
+            # Step 3: Generate wake tone to activate radio TX
             self._play_wake_tone()
 
-            # Step 3: Small delay for radio to fully key up
+            # Step 4: Small delay for radio to fully key up
             time.sleep(0.2)
 
-            # Step 4: Play the processed audio
+            # Step 5: Play the processed audio
             self._play_audio_file(processed_filepath)
 
         finally:
@@ -165,6 +173,32 @@ class EnhancedTxPlayWorker(Worker):
         except Exception as e:
             self.logger.error(f"Error in audio preprocessing: {e}")
             return None
+
+    def _set_max_volume(self):
+        """Set the soundcard volume to maximum using amixer."""
+        try:
+            # Try to set the Master volume to 100%
+            result = subprocess.run(
+                ["amixer", "sset", self.volume_control_device, "100%"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+
+            if result.returncode == 0:
+                self.logger.debug(
+                    f"Volume set to maximum for {self.volume_control_device}"
+                )
+            else:
+                self.logger.warning(f"Failed to set volume: {result.stderr}")
+
+        except subprocess.TimeoutExpired:
+            self.logger.warning("Volume control command timed out")
+        except FileNotFoundError:
+            self.logger.warning("amixer not found - volume control disabled")
+        except Exception as e:
+            self.logger.error(f"Error setting volume: {e}")
 
     def _play_wake_tone(self):
         """Play a wake-up tone to activate radio PTT reliably."""
