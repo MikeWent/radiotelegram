@@ -594,212 +594,49 @@ class EnhancedRxListenWorker(Worker):
 
     def _test_audio_device(self):
         """Test audio device availability and log diagnostics."""
-        try:
-            # First check if PipeWire is running
-            self._check_pipewire_status()
-
-            # Test if we can list audio devices
-            result = subprocess.run(
-                ["ffmpeg", "-f", "alsa", "-list_devices", "true", "-i", "dummy"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.stderr:
-                self.logger.debug(f"Available ALSA devices:\n{result.stderr}")
-
-            # Extract available input devices from the output
-            available_devices = self._parse_alsa_devices(result.stderr)
-            self.logger.info(f"Detected ALSA input devices: {available_devices}")
-
-            # Test the configured device first
-            if self._test_device(self.audio_device):
-                self.logger.info(f"Audio device '{self.audio_device}' is working")
-                return
-
-            # If default device fails, try other common device names
-            fallback_devices = [
-                "pulse",  # PulseAudio/PipeWire compatibility layer (try first)
-                "pipewire",  # Direct PipeWire access
-                "hw:0,0",
-                "plughw:0,0",
-                "hw:1,0",
-                "plughw:1,0",
-                "hw:2,0",
-                "plughw:2,0",  # Try more hardware devices
-                "hw:0",
-                "plughw:0",  # Simplified hardware references
-                "hw:1",
-                "plughw:1",
-            ]
-
-            for device in fallback_devices:
-                if device != self.audio_device:  # Don't test the same device twice
-                    self.logger.info(f"Testing fallback audio device: {device}")
-                    if self._test_device(device):
-                        self.logger.info(f"Switching to working audio device: {device}")
-                        self.audio_device = device
-                        return
-
-            # If no device works, log the problem and provide diagnostics
-            self._log_troubleshooting_info()
-            self._run_audio_diagnostics()
-
-        except subprocess.TimeoutExpired:
-            self.logger.error("Audio device test timed out")
-        except Exception as e:
-            self.logger.error(f"Audio device test error: {e}")
-
-    def _run_audio_diagnostics(self):
-        """Run comprehensive audio diagnostics to help troubleshoot issues."""
-        self.logger.info("Running audio diagnostics...")
-
-        try:
-            # Check what processes are using audio
-            lsof_result = subprocess.run(
-                ["sudo", "lsof", "/dev/snd/*"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if lsof_result.returncode == 0 and lsof_result.stdout:
-                self.logger.info(
-                    f"Processes using audio devices:\n{lsof_result.stdout}"
-                )
-            else:
-                self.logger.info(
-                    "No processes found using audio devices (or lsof failed)"
-                )
-
-        except subprocess.TimeoutExpired:
-            self.logger.warning("Audio diagnostics lsof command timed out")
-        except Exception as e:
-            self.logger.debug(f"Could not run lsof diagnostics: {e}")
-
-        try:
-            # List available ALSA devices
-            arecord_result = subprocess.run(
-                ["arecord", "-l"], capture_output=True, text=True, timeout=10
-            )
-            if arecord_result.returncode == 0:
-                self.logger.info(f"ALSA recording devices:\n{arecord_result.stdout}")
-            else:
-                self.logger.warning(f"arecord -l failed: {arecord_result.stderr}")
-
-        except subprocess.TimeoutExpired:
-            self.logger.warning("arecord command timed out")
-        except Exception as e:
-            self.logger.debug(f"Could not run arecord diagnostics: {e}")
-
-        try:
-            # Check user groups
-            groups_result = subprocess.run(
-                ["groups"], capture_output=True, text=True, timeout=5
-            )
-            if groups_result.returncode == 0:
-                groups = groups_result.stdout.strip()
-                self.logger.info(f"User groups: {groups}")
-                if "audio" not in groups:
-                    self.logger.warning(
-                        "User is not in 'audio' group - this may cause permission issues"
-                    )
-            else:
-                self.logger.debug("Could not check user groups")
-
-        except Exception as e:
-            self.logger.debug(f"Could not check user groups: {e}")
-
-        try:
-            # Check PipeWire services status
-            pipewire_status = subprocess.run(
-                ["systemctl", "--user", "is-active", "pipewire"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            pulse_status = subprocess.run(
-                ["systemctl", "--user", "is-active", "pipewire-pulse"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.logger.info(
-                f"PipeWire service status: {pipewire_status.stdout.strip()}"
-            )
-            self.logger.info(
-                f"PipeWire-Pulse service status: {pulse_status.stdout.strip()}"
-            )
-
-        except Exception as e:
-            self.logger.debug(f"Could not check PipeWire service status: {e}")
-
-    def _check_pipewire_status(self):
-        """Check if PipeWire is running and log status."""
-        try:
-            # Check if PipeWire daemon is running
-            pipewire_result = subprocess.run(
-                ["pgrep", "-f", "pipewire"], capture_output=True, text=True
-            )
-
-            if pipewire_result.returncode == 0:
-                self.logger.info("PipeWire daemon is running")
-
-                # Try to get PipeWire-pulse status
-                try:
-                    pulse_result = subprocess.run(
-                        ["pgrep", "-f", "pipewire-pulse"],
-                        capture_output=True,
-                        text=True,
-                    )
-                    if pulse_result.returncode == 0:
-                        self.logger.info(
-                            "PipeWire-PulseAudio compatibility layer is running"
-                        )
-                except:
-                    pass
-
-            else:
-                self.logger.warning(
-                    "PipeWire daemon not detected, checking for PulseAudio..."
-                )
-
-                # Check for PulseAudio
-                pulse_result = subprocess.run(
-                    ["pgrep", "-f", "pulseaudio"], capture_output=True, text=True
-                )
-
-                if pulse_result.returncode == 0:
-                    self.logger.info("PulseAudio daemon is running")
-                else:
-                    self.logger.warning("Neither PipeWire nor PulseAudio detected")
-
-        except Exception as e:
-            self.logger.debug(f"Could not check PipeWire/PulseAudio status: {e}")
-
-    def _log_troubleshooting_info(self):
-        """Log comprehensive troubleshooting information."""
-        self.logger.error("No working audio input device found!")
-        self.logger.error("PipeWire/PulseAudio troubleshooting:")
-        self.logger.error(
-            "1. Check if PipeWire is running: 'systemctl --user status pipewire'"
+        # Test if we can list audio devices
+        result = subprocess.run(
+            ["ffmpeg", "-f", "alsa", "-list_devices", "true", "-i", "dummy"],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-        self.logger.error(
-            "2. Start PipeWire: 'systemctl --user start pipewire pipewire-pulse'"
-        )
-        self.logger.error("3. Check what's using audio: 'sudo lsof /dev/snd/*'")
-        self.logger.error(
-            "4. Stop other audio applications (browsers, media players, etc.)"
-        )
-        self.logger.error(
-            "5. Restart audio services: 'systemctl --user restart pipewire'"
-        )
-        self.logger.error("6. Check if you're in audio group: 'groups $USER'")
-        self.logger.error("7. Verify hardware: 'arecord -l' and 'aplay -l'")
-        self.logger.error("8. For ALSA fallback: 'sudo alsa force-reload'")
-        self.logger.error("9. Check for exclusive mode: kill other audio processes")
+        if result.stderr:
+            self.logger.debug(f"Available ALSA devices:\n{result.stderr}")
 
-    @cpu_intensive
+        # Extract available input devices from the output
+        available_devices = self._parse_alsa_devices(result.stderr)
+        self.logger.info(f"Detected ALSA input devices: {available_devices}")
+
+        # Test the configured device first
+        if self._test_device(self.audio_device):
+            self.logger.info(f"Audio device '{self.audio_device}' is working")
+            return
+
+        # If default device fails, try other common device names
+        fallback_devices = [
+            "pulse",  # PulseAudio/PipeWire compatibility layer (try first)
+            "pipewire",  # Direct PipeWire access
+            "hw:0,0",
+            "plughw:0,0",
+            "hw:1,0",
+            "plughw:1,0",
+            "hw:2,0",
+            "plughw:2,0",  # Try more hardware devices
+            "hw:0",
+            "plughw:0",  # Simplified hardware references
+            "hw:1",
+            "plughw:1",
+        ]
+
+        for device in fallback_devices:
+            if device != self.audio_device:  # Don't test the same device twice
+                self.logger.info(f"Testing fallback audio device: {device}")
+                if self._test_device(device):
+                    self.logger.info(f"Switching to working audio device: {device}")
+                    self.audio_device = device
+                    return
+
     def _add_to_pre_record_buffer(self, audio_chunk: np.ndarray):
         """Add audio chunk to the pre-recording circular buffer."""
         # Convert to bytes for consistent storage
