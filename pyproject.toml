@@ -9,4 +9,5 @@ dependencies = [
     "pytelegrambotapi>=4.28.0",
     "python-dotenv>=1.1.1",
     "scipy>=1.16.0",
+    "ten-vad>=1.0.6",
 ]

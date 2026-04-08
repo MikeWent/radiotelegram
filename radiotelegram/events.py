@@ -29,22 +29,17 @@ class RxAudioStatsEvent:
     # Squelch status
     squelch_open: bool
 
-    # Voice detection metrics
-    voice_ratio_score: float
-    voice_quality: float
-    spectral_centroid: float
+    # TEN-VAD metrics
+    vad_probability: float
+    vad_flag: int
+
+    # Scoring
+    level_score: float = 0.0
+    combined_score: float = 0.0
 
     # Optional performance metrics
     avg_process_time_ms: float = 0.0
     max_process_time_ms: float = 0.0
-
-    # Additional spectral data
-    voice_energy: float = 0.0
-    total_energy: float = 0.0
-    level_score: float = 0.0
-    centroid_score: float = 0.0
-    quality_score: float = 0.0
-    combined_score: float = 0.0
 
 
 # Playback

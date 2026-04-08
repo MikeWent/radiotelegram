@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y \
     # System utilities
     lsof \
     procps \
+    # Required by TEN-VAD
+    libc++1 \
     # Python build tools
     build-essential \
     python3-dev \

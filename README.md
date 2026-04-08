@@ -10,7 +10,7 @@ Telegram voice messages <> Baofeng radio RX/TX two-way bridge (half-duplex) with
 
 ## enhanced audio processing features
 - **Advanced Squelch**: Multi-criteria signal detection with spectral analysis and adaptive noise floor
-- **Voice Detection**: Frequency domain analysis optimized for voice communications (300Hz-3.4kHz)  
+- **Voice Detection**: [TEN-VAD](https://github.com/ten-framework/ten-vad) neural network voice activity detection with per-frame probability scoring
 - **Radio-optimized Processing**: Pre-emphasis, bandpass filtering, and dynamic range compression
 - **Noise Reduction**: Spectral noise reduction with adaptive thresholds
 - **PTT Reliability**: Wake tone generation for consistent radio keying
@@ -92,4 +92,4 @@ sudo apt install ffmpeg python3-venv python3-dev build-essential
 MIT
 
 # credits
-thx to claude sonnet 4 for comprehensive audio analysis and filter code generation.
+thx to claude sonnet 4 for comprehensive audio analysis and filter code generation, and opus 4.6 for integrating ten vad.

@@ -23,6 +23,9 @@ from radiotelegram.events import (
 )
 from radiotelegram.voice_detection import VoiceDetector
 
+# Real-time TEN-VAD for live stats
+from ten_vad import TenVad
+
 
 class EnhancedRxListenWorker(Worker):
     """Enhanced receiver worker with advanced audio processing."""
@@ -33,9 +36,7 @@ class EnhancedRxListenWorker(Worker):
         super().__init__(bus)
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size  # Reduced default chunk size for lower latency
-        self.audio_device = (
-            audio_device  # Default to USB audio device (hw:1,0)
-        )
+        self.audio_device = audio_device  # Default to USB audio device (hw:1,0)
 
         # Recording parameters optimized for responsive squelch
         self.silence_duration = 2.0  # Seconds to wait before stopping recording
@@ -67,6 +68,14 @@ class EnhancedRxListenWorker(Worker):
         self.squelch = AdvancedSquelch(sample_rate)
         self.voice_detector = VoiceDetector(sample_rate)
 
+        self._rt_vad_hop = 256
+        self._rt_vad = TenVad(hop_size=self._rt_vad_hop, threshold=0.5)
+        self._rt_vad_target_sr = 16000
+        self._rt_vad_ratio = sample_rate // self._rt_vad_target_sr  # e.g. 3 for 48k
+        self._rt_vad_buf = np.empty(0, dtype=np.int16)
+        self._rt_vad_probability = 0.0
+        self._rt_vad_flag = 0
+
         # Statistics and monitoring - reduced interval for better responsiveness monitoring
         self.stats_interval = 2.0  # Publish stats every 2 seconds (reduced from 5s)
         self.last_stats_publish_time = 0
@@ -81,7 +90,9 @@ class EnhancedRxListenWorker(Worker):
         self.streaming_timeout = (
             10.0  # Seconds without audio before considering stream dead
         )
-        self.audio_processing_watchdog_timeout = 30.0  # Seconds without any activity before force restart
+        self.audio_processing_watchdog_timeout = (
+            30.0  # Seconds without any activity before force restart
+        )
 
         # Store reference for thread management
         self._processing_thread = None
@@ -115,6 +126,9 @@ class EnhancedRxListenWorker(Worker):
 
     def _test_audio_device(self):
         """Test audio device availability and log diagnostics."""
+        # Log detailed info about the configured input device
+        self._log_device_info()
+
         # Test if we can list audio devices
         result = subprocess.run(
             ["ffmpeg", "-f", "alsa", "-list_devices", "true", "-i", "dummy"],
@@ -136,16 +150,16 @@ class EnhancedRxListenWorker(Worker):
 
         # If default device fails, try other ALSA hardware devices
         fallback_devices = [
-            "hw:1,0",      # USB audio device (typical)
+            "hw:1,0",  # USB audio device (typical)
             "plughw:1,0",  # USB audio with format conversion
-            "hw:0,0",      # Built-in audio
+            "hw:0,0",  # Built-in audio
             "plughw:0,0",  # Built-in audio with format conversion
-            "hw:2,0",      # Additional audio device
+            "hw:2,0",  # Additional audio device
             "plughw:2,0",  # Additional audio with format conversion
-            "hw:1",        # Simplified USB device reference
-            "plughw:1",    # Simplified USB device with format conversion
-            "hw:0",        # Simplified built-in reference
-            "plughw:0",    # Simplified built-in with format conversion
+            "hw:1",  # Simplified USB device reference
+            "plughw:1",  # Simplified USB device with format conversion
+            "hw:0",  # Simplified built-in reference
+            "plughw:0",  # Simplified built-in with format conversion
         ]
 
         for device in fallback_devices:
@@ -211,6 +225,80 @@ class EnhancedRxListenWorker(Worker):
                     device_info = line.split("]", 1)[1].strip()
                     devices.append(device_info)
         return devices
+
+    def _log_device_info(self):
+        """Log detailed information about available sound cards and the configured device."""
+        import re
+
+        try:
+            # List all capture (input) devices
+            result = subprocess.run(
+                ["arecord", "-l"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                self.logger.info(f"Available capture devices:\n{result.stdout.strip()}")
+            else:
+                self.logger.warning("No capture devices found via arecord -l")
+
+            # List all playback (output) devices
+            result = subprocess.run(
+                ["aplay", "-l"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                self.logger.info(
+                    f"Available playback devices:\n{result.stdout.strip()}"
+                )
+
+            # Resolve card name for the configured device
+            card_match = re.search(r"hw:(\d+)", self.audio_device)
+            if card_match:
+                card_num = card_match.group(1)
+                card_name_path = f"/proc/asound/card{card_num}/id"
+                usbid_path = f"/proc/asound/card{card_num}/usbid"
+                longname_path = f"/proc/asound/card{card_num}/longname"
+
+                name = stream_info = usb_id = None
+                for path in [longname_path, card_name_path]:
+                    try:
+                        with open(path) as f:
+                            name = f.read().strip()
+                            break
+                    except FileNotFoundError:
+                        continue
+
+                try:
+                    with open(usbid_path) as f:
+                        usb_id = f.read().strip()
+                except FileNotFoundError:
+                    pass
+
+                # Read stream info for detailed USB audio descriptor
+                stream_path = f"/proc/asound/card{card_num}/stream0"
+                try:
+                    with open(stream_path) as f:
+                        stream_info = f.read().strip().split("\n")[0]
+                except FileNotFoundError:
+                    pass
+
+                device_desc = name or "unknown"
+                if usb_id:
+                    device_desc += f" [USB {usb_id}]"
+                if stream_info:
+                    device_desc += f" ({stream_info})"
+                self.logger.info(
+                    f"Configured RX input device: {self.audio_device} -> {device_desc}"
+                )
+            else:
+                self.logger.info(f"Configured RX input device: {self.audio_device}")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to query audio device info: {e}")
 
     def _test_device(self, device):
         """Test if a specific audio device works by recording a short sample."""
@@ -544,13 +632,10 @@ class EnhancedRxListenWorker(Worker):
                 self.logger.info(
                     f"Voice analysis - "
                     f"Contains voice: {is_voice}, "
-                    f"Energy: {analysis.get('avg_energy_db', 0):.1f}dB, "
-                    f"Voice ratio: {analysis.get('avg_voice_ratio', 0):.3f}, "
-                    f"Voice quality: {analysis.get('avg_voice_quality', 0):.3f}, "
-                    f"Consistency: {analysis.get('voice_consistency', 0):.1%}, "
-                    f"Sustained: {analysis.get('sustained_energy_ratio', 0):.1%}, "
-                    f"Spectral stability: {analysis.get('spectral_stability', 0):.3f}, "
-                    f"Centroid: {analysis.get('avg_spectral_centroid', 0):.0f}Hz"
+                    f"Voice ratio: {analysis.get('voice_ratio', 0):.1%}, "
+                    f"Avg probability: {analysis.get('avg_probability', 0):.3f}, "
+                    f"Max probability: {analysis.get('max_probability', 0):.3f}, "
+                    f"Voice frames: {analysis.get('voice_frames', 0)}/{analysis.get('total_frames', 0)}"
                 )
 
                 if is_voice:
@@ -733,7 +818,7 @@ class EnhancedRxListenWorker(Worker):
     def _immediate_squelch_process(self, audio_chunk: np.ndarray) -> Tuple[bool, dict]:
         """
         Immediate squelch processing without threading for minimal latency.
-        This is a simplified version of the squelch processing optimized for speed.
+        Uses TEN-VAD for voice activity and level analysis for squelch decisions.
         """
         try:
             # Basic level analysis (fast)
@@ -746,58 +831,32 @@ class EnhancedRxListenWorker(Worker):
             )
             level_margin_db = current_db - noise_floor_db
 
-            # Simplified spectral analysis for speed
-            if (
-                len(audio_chunk) >= 256
-            ):  # Only do spectral analysis if we have enough samples
-                # Use a smaller FFT for speed
-                fft_chunk = audio_chunk[:256] if len(audio_chunk) > 256 else audio_chunk
-                voice_energy, total_energy, spectral_centroid, voice_quality = (
-                    self.squelch.spectral_analyzer.analyze_spectrum(fft_chunk)
+            # Feed audio to real-time TEN-VAD (downsample 48kHz -> 16kHz)
+            self._rt_vad_buf = np.append(self._rt_vad_buf, audio_chunk)
+            samples_needed = self._rt_vad_hop * self._rt_vad_ratio
+            while len(self._rt_vad_buf) >= samples_needed:
+                # Simple decimation: pick every Nth sample
+                frame_48k = self._rt_vad_buf[:samples_needed]
+                frame_16k = frame_48k[:: self._rt_vad_ratio].astype(np.int16)
+                self._rt_vad_probability, self._rt_vad_flag = self._rt_vad.process(
+                    frame_16k
                 )
-            else:
-                # Skip spectral analysis for very small chunks
-                voice_energy = 0
-                total_energy = 1
-                spectral_centroid = 1000  # Assume reasonable default
-                voice_quality = 0
+                self._rt_vad_buf = self._rt_vad_buf[samples_needed:]
 
-            # Simplified scoring for immediate response
+            vad_probability = self._rt_vad_probability
+            vad_flag = self._rt_vad_flag
+
+            # Level score from signal margin
             level_score = max(
                 0, min(1, (level_margin_db - 3) / 15)
             )  # Smooth 3-18dB range
-
-            if total_energy > 0:
-                voice_ratio_score = min(
-                    1, voice_energy / total_energy / self.squelch.voice_energy_ratio
-                )
-            else:
-                voice_ratio_score = 0
-
-            # Simplified spectral centroid score
-            if (
-                self.squelch.spectral_centroid_min
-                <= spectral_centroid
-                <= self.squelch.spectral_centroid_max
-            ):
-                centroid_score = 1.0
-            else:
-                centroid_score = 0.5
-
-            # Simplified voice quality score
-            quality_score = min(1.0, voice_quality / self.squelch.min_voice_quality)
 
             # Absolute level check
             if current_db < self.squelch.min_absolute_level:
                 level_score = 0
 
-            # Simplified scoring (prioritize level for immediate response)
-            combined_score = (
-                0.5 * level_score  # Higher weight on signal strength for fast response
-                + 0.2 * voice_ratio_score  # Reduced weight on complex analysis
-                + 0.15 * centroid_score
-                + 0.15 * quality_score
-            )
+            # Combined score: level + TEN-VAD probability
+            combined_score = 0.5 * level_score + 0.5 * vad_probability
 
             # Apply hysteresis
             threshold = (
@@ -811,14 +870,9 @@ class EnhancedRxListenWorker(Worker):
                 "current_db": current_db,
                 "noise_floor_db": noise_floor_db,
                 "level_margin_db": level_margin_db,
-                "voice_energy": voice_energy,
-                "total_energy": total_energy,
-                "spectral_centroid": spectral_centroid,
-                "voice_quality": voice_quality,
                 "level_score": level_score,
-                "voice_ratio_score": voice_ratio_score,
-                "centroid_score": centroid_score,
-                "quality_score": quality_score,
+                "vad_probability": vad_probability,
+                "vad_flag": vad_flag,
                 "combined_score": combined_score,
                 "squelch_open": self.squelch.is_open,
             }
@@ -832,14 +886,9 @@ class EnhancedRxListenWorker(Worker):
                 "current_db": -60.0,
                 "noise_floor_db": -60.0,
                 "level_margin_db": 0.0,
-                "voice_energy": 0,
-                "total_energy": 1,
-                "spectral_centroid": 1000,
-                "voice_quality": 0,
                 "level_score": 0,
-                "voice_ratio_score": 0,
-                "centroid_score": 0,
-                "quality_score": 0,
+                "vad_probability": 0.0,
+                "vad_flag": 0,
                 "combined_score": 0,
                 "squelch_open": False,
             }
@@ -847,16 +896,14 @@ class EnhancedRxListenWorker(Worker):
     def _process_audio_chunk(self, audio_chunk: np.ndarray):
         """
         Process audio chunk using the threaded bus system.
-        The @cpu_intensive decorator on squelch.process() handles threading automatically.
+        Fallback path — delegates to _immediate_squelch_process for TEN-VAD integration.
         """
         try:
             # Always add to pre-record buffer (unless we're already recording)
             if not self.recording:
                 self._add_to_pre_record_buffer(audio_chunk)
 
-            # The squelch.process method is marked with @cpu_intensive, so it will
-            # automatically run in a separate thread via the bus system
-            squelch_open, stats = self.squelch.process(audio_chunk)
+            squelch_open, stats = self._immediate_squelch_process(audio_chunk)
 
             # Handle squelch state changes (fast operations, synchronous)
             current_time = time.time()
@@ -937,7 +984,7 @@ class EnhancedRxListenWorker(Worker):
             )
 
             success = self._process_audio_stream_once()
-            
+
             if success:
                 # Successful run, reset xrun counter and don't retry unless it fails again
                 xrun_retry_count = 0
@@ -953,7 +1000,9 @@ class EnhancedRxListenWorker(Worker):
 
                     # For ALSA xruns, try shorter retry delays
                     if xrun_retry_count < max_xrun_retries:
-                        retry_delay = min(1.0, retry_delay)  # Shorter delay for xrun recovery
+                        retry_delay = min(
+                            1.0, retry_delay
+                        )  # Shorter delay for xrun recovery
                         xrun_retry_count += 1
                     else:
                         # Try to find a different device for next attempt
@@ -965,65 +1014,84 @@ class EnhancedRxListenWorker(Worker):
         # Final attempt to restart if all retries failed
         if not self.enabled:
             return
-            
-        self.logger.warning("Audio stream processing ended, will be restarted by main loop if needed")
+
+        self.logger.warning(
+            "Audio stream processing ended, will be restarted by main loop if needed"
+        )
 
     def _audio_processing_watchdog(self):
         """Monitor audio processing health and restart if necessary."""
         self.logger.info("Audio processing watchdog started")
-        
+
         last_watchdog_check = time.time()
-        
+
         while self.enabled:
             try:
                 current_time = time.time()
-                
+
                 # Check if we've received audio data recently
-                if self.last_chunk_time > 0:  # Only check if we've received at least one chunk
+                if (
+                    self.last_chunk_time > 0
+                ):  # Only check if we've received at least one chunk
                     time_since_last_chunk = current_time - self.last_chunk_time
-                    
+
                     if time_since_last_chunk > self.audio_processing_watchdog_timeout:
                         self.logger.error(
                             f"Audio processing watchdog: No audio data for {time_since_last_chunk:.1f}s, "
                             f"restarting audio processing"
                         )
-                        
+
                         # Force stop current streaming process
-                        if self.streaming_process and self.streaming_process.poll() is None:
-                            self.logger.warning("Watchdog: Force terminating hung FFmpeg process")
+                        if (
+                            self.streaming_process
+                            and self.streaming_process.poll() is None
+                        ):
+                            self.logger.warning(
+                                "Watchdog: Force terminating hung FFmpeg process"
+                            )
                             try:
                                 self.streaming_process.kill()
                                 self.streaming_process.wait(timeout=2)
                             except:
                                 pass
-                        
+
                         # Reset last chunk time to prevent immediate re-trigger
                         self.last_chunk_time = 0
-                        
+
                         # Restart audio processing
                         if self.enabled:
-                            self.logger.info("Watchdog: Restarting audio stream processing")
+                            self.logger.info(
+                                "Watchdog: Restarting audio stream processing"
+                            )
                             self._audio_thread = threading.Thread(
-                                target=self.process_audio_stream, daemon=True, name="AudioStreamThread-Restart"
+                                target=self.process_audio_stream,
+                                daemon=True,
+                                name="AudioStreamThread-Restart",
                             )
                             self._audio_thread.start()
-                
+
                 # Check if audio thread is still alive
-                if hasattr(self, '_audio_thread') and self._audio_thread and not self._audio_thread.is_alive():
+                if (
+                    hasattr(self, "_audio_thread")
+                    and self._audio_thread
+                    and not self._audio_thread.is_alive()
+                ):
                     if self.enabled:
                         self.logger.warning("Audio processing thread died, restarting")
                         self._audio_thread = threading.Thread(
-                            target=self.process_audio_stream, daemon=True, name="AudioStreamThread-Restart"
+                            target=self.process_audio_stream,
+                            daemon=True,
+                            name="AudioStreamThread-Restart",
                         )
                         self._audio_thread.start()
-                
+
                 # Sleep for a reasonable interval
                 time.sleep(5.0)
-                
+
             except Exception as e:
                 self.logger.error(f"Error in audio processing watchdog: {e}")
                 time.sleep(10.0)  # Longer sleep on errors
-                
+
         self.logger.info("Audio processing watchdog stopped")
 
     def _process_audio_stream_once(self) -> bool:
@@ -1115,15 +1183,26 @@ class EnhancedRxListenWorker(Worker):
                             # Process has terminated, try to get error info
                             _, stderr = process.communicate(timeout=1)
                             error_msg = stderr.decode() if stderr else "Unknown error"
-                            
+
                             # Check for specific ALSA buffer xrun errors
-                            if "ALSA buffer xrun" in error_msg or "xrun" in error_msg.lower():
-                                self.logger.warning(f"FFmpeg ALSA buffer xrun detected: {error_msg}")
-                                self.logger.info("ALSA buffer xrun is usually caused by system load or audio device issues")
+                            if (
+                                "ALSA buffer xrun" in error_msg
+                                or "xrun" in error_msg.lower()
+                            ):
+                                self.logger.warning(
+                                    f"FFmpeg ALSA buffer xrun detected: {error_msg}"
+                                )
+                                self.logger.info(
+                                    "ALSA buffer xrun is usually caused by system load or audio device issues"
+                                )
                                 # Return True to allow retry with potentially different settings
-                                return successful_chunks >= 5  # Lower threshold for xrun recovery
+                                return (
+                                    successful_chunks >= 5
+                                )  # Lower threshold for xrun recovery
                             else:
-                                self.logger.error(f"FFmpeg process terminated: {error_msg}")
+                                self.logger.error(
+                                    f"FFmpeg process terminated: {error_msg}"
+                                )
                                 return successful_chunks >= min_successful_chunks
 
                         # Use non-blocking read with select for immediate response
@@ -1143,7 +1222,9 @@ class EnhancedRxListenWorker(Worker):
                         if not raw_data:
                             # No data available, check if process is still alive
                             if process.poll() is not None:
-                                self.logger.warning("FFmpeg process ended, no more data available")
+                                self.logger.warning(
+                                    "FFmpeg process ended, no more data available"
+                                )
                                 break
                             # Add small delay to prevent tight loop
                             time.sleep(0.001)
@@ -1217,42 +1298,36 @@ class EnhancedRxListenWorker(Worker):
             self.logger.info("Audio stream processing stopped")
 
     def _publish_enhanced_stats(self, stats: dict):
-        """Publish enhanced statistics including spectral analysis and performance metrics."""
-        # Publish the new unified audio stats event
+        """Publish enhanced statistics including TEN-VAD and performance metrics."""
         self.bus.publish(
             RxAudioStatsEvent(
                 current_db=float(stats["current_db"]),
                 noise_floor_db=float(stats["noise_floor_db"]),
                 level_margin_db=float(stats["level_margin_db"]),
                 squelch_open=bool(stats["squelch_open"]),
-                voice_ratio_score=float(stats["voice_ratio_score"]),
-                voice_quality=float(stats["voice_quality"]),
-                spectral_centroid=float(stats["spectral_centroid"]),
+                vad_probability=float(stats.get("vad_probability", 0)),
+                vad_flag=int(stats.get("vad_flag", 0)),
+                level_score=float(stats.get("level_score", 0)),
+                combined_score=float(stats.get("combined_score", 0)),
                 avg_process_time_ms=float(stats.get("avg_process_time_ms", 0)),
                 max_process_time_ms=float(stats.get("max_process_time_ms", 0)),
-                voice_energy=float(stats.get("voice_energy", 0)),
-                total_energy=float(stats.get("total_energy", 0)),
-                level_score=float(stats.get("level_score", 0)),
-                centroid_score=float(stats.get("centroid_score", 0)),
-                quality_score=float(stats.get("quality_score", 0)),
-                combined_score=float(stats.get("combined_score", 0)),
             )
         )
 
-        # Log detailed stats for debugging/monitoring including performance
         performance_info = ""
         if "avg_process_time_ms" in stats and "max_process_time_ms" in stats:
-            performance_info = f", Avg process: {stats['avg_process_time_ms']:.2f}ms, Max: {stats['max_process_time_ms']:.2f}ms"
+            performance_info = f", Processing: {stats['avg_process_time_ms']:.2f}ms avg, {stats['max_process_time_ms']:.2f}ms max"
 
+        vad_prob = stats.get("vad_probability", 0)
+        vad_flag = stats.get("vad_flag", 0)
         self.logger.info(
-            f"Audio Stats - "
             f"Level: {stats['current_db']:.1f}dB, "
             f"Noise: {stats['noise_floor_db']:.1f}dB, "
             f"Margin: {stats['level_margin_db']:.1f}dB, "
             f"Squelch: {'OPEN' if stats['squelch_open'] else 'CLOSED'}, "
-            f"Voice ratio: {stats['voice_ratio_score']:.2f}, "
-            f"Voice quality: {stats['voice_quality']:.2f}, "
-            f"Spectral centroid: {stats['spectral_centroid']:.0f}Hz"
+            f"VAD: {vad_prob:.2f} ({'VOICE' if vad_flag else 'silence'}), "
+            f"Score: {stats.get('combined_score', 0):.2f} "
+            f"(level={stats.get('level_score', 0):.2f} vad={vad_prob:.2f})"
             f"{performance_info}"
         )
 
@@ -1266,10 +1341,12 @@ class EnhancedRxListenWorker(Worker):
             target=self.process_audio_stream, daemon=True, name="AudioStreamThread"
         )
         self._audio_thread.start()
-        
+
         # Start a watchdog thread to monitor audio processing health
         self._watchdog_thread = threading.Thread(
-            target=self._audio_processing_watchdog, daemon=True, name="AudioWatchdogThread"
+            target=self._audio_processing_watchdog,
+            daemon=True,
+            name="AudioWatchdogThread",
         )
         self._watchdog_thread.start()
 

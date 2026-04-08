@@ -42,6 +42,27 @@ class EnhancedTxPlayWorker(Worker):
         self.max_volume_enabled = True  # Enable automatic volume maximization
         self.volume_control_device = "PCM"  # ALSA mixer control name
 
+        self._log_output_device_info()
+
+    def _log_output_device_info(self):
+        """Log information about the default playback device."""
+        try:
+            # Get the default ALSA playback device info
+            result = subprocess.run(
+                ["aplay", "-l"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # Find the default card (card 0) or first available
+                for line in result.stdout.strip().split("\n"):
+                    if line.startswith("card "):
+                        self.logger.info(f"TX output device: {line.strip()}")
+                        break
+        except Exception as e:
+            self.logger.warning(f"Failed to query TX output device info: {e}")
+
     def on_recording_started(self, event: RxRecordingStartedEvent):
         """Disable playback when recording starts to prevent interference."""
         self.enabled = False
