@@ -12,6 +12,7 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - TELEGRAM_TOPIC_ID=${TELEGRAM_TOPIC_ID}
       - AUDIO_DEVICE=${AUDIO_DEVICE:-hw:1,0}
+      - AUDIO_OUTPUT_DEVICE=${AUDIO_OUTPUT_DEVICE:-hw:1,0}
     
     # Load environment from .env file
     env_file:

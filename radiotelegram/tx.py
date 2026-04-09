@@ -17,13 +17,14 @@ from radiotelegram.events import (
 class EnhancedTxPlayWorker(Worker):
     """Transmitter: processes and plays voice messages over radio."""
 
-    def __init__(self, bus):
+    def __init__(self, bus, audio_output_device="pulse"):
         super().__init__(bus)
 
         self.bus.subscribe(TelegramVoiceMessageDownloadedEvent, self.queue_event)
         self.bus.subscribe(RxRecordingStartedEvent, self.on_recording_started)
         self.bus.subscribe(RxRecordingEndedEvent, self.on_recording_finished)
 
+        self.audio_output_device = audio_output_device
         self.timeout_seconds = 30
         self.wake_tone_frequency = 1750
         self.wake_tone_duration = 0.3
@@ -35,20 +36,7 @@ class EnhancedTxPlayWorker(Worker):
         self.max_volume_enabled = True
         self.volume_control_device = "PCM"
 
-        self._log_output_device_info()
-
-    def _log_output_device_info(self):
-        try:
-            result = subprocess.run(
-                ["aplay", "-l"], capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
-                    if line.startswith("card "):
-                        self.logger.info(f"TX output device: {line.strip()}")
-                        break
-        except Exception as e:
-            self.logger.warning(f"Failed to query TX output device: {e}")
+        self.logger.info(f"TX output device configured: {self.audio_output_device}")
 
     def on_recording_started(self, event):
         self.enabled = False
@@ -110,12 +98,26 @@ class EnhancedTxPlayWorker(Worker):
             )
             result = subprocess.run(
                 [
-                    "ffmpeg", "-y", "-i", input_filepath,
-                    "-filter_complex", filter_complex, "-map", "[a]",
-                    "-ar", "48000", "-c:a", "libopus", "-b:a", "96k", out,
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    input_filepath,
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    "[a]",
+                    "-ar",
+                    "48000",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "96k",
+                    out,
                 ],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True, timeout=30,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
             )
             return out if result.returncode == 0 else None
         except Exception as e:
@@ -124,24 +126,43 @@ class EnhancedTxPlayWorker(Worker):
 
     def _set_max_volume(self):
         try:
+            cmd = ["amixer"]
+            if self.audio_output_device and self.audio_output_device != "pulse":
+                card = self.audio_output_device.replace("hw:", "").split(",")[0]
+                cmd += ["-c", card]
+            cmd += ["sset", self.volume_control_device, "100%"]
             subprocess.run(
-                ["amixer", "sset", self.volume_control_device, "100%"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=5,
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
             pass
 
     def _play_wake_tone(self):
         try:
+            cmd = [
+                "ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+            ]
+            if self.audio_output_device and self.audio_output_device != "pulse":
+                cmd += ["-audio_device", self.audio_output_device]
+            cmd += [
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency={self.wake_tone_frequency}:"
+                f"duration={self.wake_tone_duration}",
+            ]
             proc = subprocess.Popen(
-                [
-                    "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
-                    "-f", "lavfi", "-i",
-                    f"sine=frequency={self.wake_tone_frequency}:"
-                    f"duration={self.wake_tone_duration}",
-                ],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             try:
                 proc.wait(timeout=self.wake_tone_duration + 1.0)
@@ -156,12 +177,20 @@ class EnhancedTxPlayWorker(Worker):
 
     def _play_audio_file(self, filepath):
         try:
+            cmd = [
+                "ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+            ]
+            if self.audio_output_device and self.audio_output_device != "pulse":
+                cmd += ["-audio_device", self.audio_output_device]
+            cmd += ["-af", "volume=0.8", filepath]
             proc = subprocess.Popen(
-                [
-                    "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
-                    "-af", "volume=0.8", filepath,
-                ],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             try:
                 proc.wait(timeout=self.timeout_seconds)
@@ -176,7 +205,8 @@ class EnhancedTxPlayWorker(Worker):
 
     def start(self):
         t = threading.Thread(
-            target=self.process_queue, daemon=True,
+            target=self.process_queue,
+            daemon=True,
             name=f"{self.__class__.__name__}Queue",
         )
         t.start()
