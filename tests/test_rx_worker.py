@@ -143,12 +143,27 @@ class TestSilenceTimeout:
         self.w.recording_start_time = datetime.datetime.now()
         self.w.silence_counter = 100
         with patch.object(
-            self.w.squelch, "process",
-            return_value=(True, {
-                "current_db": -20, "noise_floor_db": -50, "level_margin_db": 30,
-                "squelch_open": True, "level_score": 1,
-                "vad_probability": 0.9, "vad_flag": 1, "combined_score": 0.9,
-            }),
+            self.w.squelch,
+            "process",
+            return_value=(
+                True,
+                {
+                    "current_db": -20,
+                    "noise_floor_db": -50,
+                    "level_margin_db": 30,
+                    "squelch_open": True,
+                    "level_score": 1,
+                    "vad_probability": 0.9,
+                    "vad_flag": 1,
+                    "combined_score": 0.9,
+                    "open_threshold": 0.65,
+                    "close_threshold": 0.55,
+                    "active_threshold": 0.55,
+                    "min_absolute_level": -40.0,
+                    "fast_noise_floor_db": -48.0,
+                    "slow_noise_floor_db": -52.0,
+                },
+            ),
         ):
             self.w._process_audio_chunk_immediate(np.zeros(256, dtype=np.int16))
         assert self.w.silence_counter == 0
@@ -197,7 +212,9 @@ class TestSquelchErrorSafety:
         self.bus.shutdown()
 
     def test_squelch_error_returns_safe_defaults(self):
-        with patch.object(self.w.squelch.noise_floor, "update", side_effect=RuntimeError):
+        with patch.object(
+            self.w.squelch.noise_floor, "update", side_effect=RuntimeError
+        ):
             is_open, stats = self.w.squelch.process(np.zeros(256, dtype=np.int16))
         assert is_open is False
         assert stats["squelch_open"] is False
@@ -217,11 +234,18 @@ class TestStatsPublishing:
     def test_publish_stats_reaches_bus(self):
         received = []
         self.bus.subscribe(RxAudioStatsEvent, received.append)
-        self.w._publish_stats({
-            "current_db": -30.0, "noise_floor_db": -50.0, "level_margin_db": 20.0,
-            "squelch_open": True, "vad_probability": 0.8, "vad_flag": 1,
-            "level_score": 0.7, "combined_score": 0.85,
-        })
+        self.w._publish_stats(
+            {
+                "current_db": -30.0,
+                "noise_floor_db": -50.0,
+                "level_margin_db": 20.0,
+                "squelch_open": True,
+                "vad_probability": 0.8,
+                "vad_flag": 1,
+                "level_score": 0.7,
+                "combined_score": 0.85,
+            }
+        )
         time.sleep(0.3)
         assert len(received) == 1
         assert received[0].squelch_open is True

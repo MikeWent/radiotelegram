@@ -99,8 +99,19 @@ class TestSquelchBehaviour:
     def test_stats_contain_expected_keys(self):
         _, stats = self.squelch.process(np.zeros(512, dtype=np.int16))
         for key in [
-            "current_db", "noise_floor_db", "level_margin_db",
-            "level_score", "vad_probability", "vad_flag",
-            "combined_score", "squelch_open",
+            "current_db",
+            "noise_floor_db",
+            "level_margin_db",
+            "level_score",
+            "vad_probability",
+            "vad_flag",
+            "combined_score",
+            "squelch_open",
+            "open_threshold",
+            "close_threshold",
+            "active_threshold",
+            "min_absolute_level",
+            "fast_noise_floor_db",
+            "slow_noise_floor_db",
         ]:
             assert key in stats

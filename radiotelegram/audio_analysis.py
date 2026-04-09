@@ -87,6 +87,12 @@ class AdvancedSquelch:
                 "vad_flag": self.vad_flag,
                 "combined_score": combined,
                 "squelch_open": self.is_open,
+                "open_threshold": self.open_threshold,
+                "close_threshold": self.close_threshold,
+                "active_threshold": threshold,
+                "min_absolute_level": self.min_absolute_level,
+                "fast_noise_floor_db": self.noise_floor.fast_noise_floor,
+                "slow_noise_floor_db": self.noise_floor.slow_noise_floor,
             }
         except Exception:
             return False, {

@@ -18,9 +18,10 @@ class VoiceDetector:
         sample_rate=48000,
         hop_size=256,
         threshold=0.5,
-        min_voice_ratio=0.05,
-        min_max_probability=0.60,
-        min_analysis_duration=0.25,
+        min_voice_ratio=0.01,
+        min_max_probability=0.55,
+        min_analysis_duration=0.5,
+        min_avg_probability=0.200,
     ):
         self.sample_rate = sample_rate
         self.hop_size = hop_size
@@ -28,6 +29,7 @@ class VoiceDetector:
         self.min_voice_ratio = min_voice_ratio
         self.min_max_probability = min_max_probability
         self.min_analysis_duration = min_analysis_duration
+        self.min_avg_probability = min_avg_probability
         self.vad = TenVad(hop_size=hop_size, threshold=threshold)
 
     def analyze_recording(self, filepath):
@@ -81,12 +83,18 @@ class VoiceDetector:
                 return False, {"error": "No audio frames to analyze"}
 
             voice_ratio = voice_frames / total_frames
-            avg_probability = float(np.mean(probabilities))
-            max_probability = float(np.max(probabilities))
+            probs = np.array(probabilities)
+            avg_probability = float(np.mean(probs))
+            max_probability = float(np.max(probs))
+            std_probability = float(np.std(probs))
+            p25, p50, p75, p90, p95 = (
+                float(v) for v in np.percentile(probs, [25, 50, 75, 90, 95])
+            )
 
             is_voice = (
                 voice_ratio > self.min_voice_ratio
                 and max_probability > self.min_max_probability
+                and avg_probability > self.min_avg_probability
             )
 
             return bool(is_voice), {
@@ -94,9 +102,19 @@ class VoiceDetector:
                 "voice_ratio": voice_ratio,
                 "avg_probability": avg_probability,
                 "max_probability": max_probability,
+                "std_probability": std_probability,
+                "p25": p25,
+                "p50": p50,
+                "p75": p75,
+                "p90": p90,
+                "p95": p95,
                 "voice_frames": voice_frames,
                 "total_frames": total_frames,
                 "is_voice": is_voice,
+                "threshold": self.threshold,
+                "min_voice_ratio": self.min_voice_ratio,
+                "min_max_probability": self.min_max_probability,
+                "min_avg_probability": self.min_avg_probability,
             }
         except Exception as e:
             return False, {"error": f"Analysis failed: {str(e)}"}

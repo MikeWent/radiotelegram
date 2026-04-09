@@ -29,6 +29,12 @@ class TestStatsLogOutput:
             vad_flag=1,
             level_score=0.7,
             combined_score=0.85,
+            open_threshold=0.65,
+            close_threshold=0.55,
+            active_threshold=0.55,
+            min_absolute_level=-40.0,
+            fast_noise_floor_db=-48.0,
+            slow_noise_floor_db=-52.0,
         )
         with caplog.at_level(logging.INFO, logger="RXListenPrintStatsWorker"):
             self.worker.handle_audio_stats(event)
@@ -36,6 +42,8 @@ class TestStatsLogOutput:
         assert "OPEN" in caplog.text
         assert "VOICE" in caplog.text
         assert "Level: -30.0dB" in caplog.text
+        assert "thr=0.55" in caplog.text
+        assert "fast=-48.0" in caplog.text
 
     def test_squelch_closed_silence_log(self, caplog):
         event = RxAudioStatsEvent(

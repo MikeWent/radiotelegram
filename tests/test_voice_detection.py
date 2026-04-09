@@ -122,8 +122,17 @@ class TestVoiceDetectionDecisions:
             "voice_ratio",
             "avg_probability",
             "max_probability",
+            "std_probability",
+            "p25",
+            "p50",
+            "p75",
+            "p90",
+            "p95",
             "voice_frames",
             "total_frames",
             "is_voice",
+            "threshold",
+            "min_voice_ratio",
+            "min_max_probability",
         ):
             assert key in info

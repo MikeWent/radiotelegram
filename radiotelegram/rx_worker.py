@@ -102,11 +102,25 @@ class EnhancedRxListenWorker(Worker):
             test_file = "/tmp/audio_test.wav"
             result = subprocess.run(
                 [
-                    "ffmpeg", "-y", "-f", "alsa", "-i", device,
-                    "-t", "0.1", "-ar", str(self.sample_rate),
-                    "-ac", "1", "-c:a", "pcm_s16le", test_file,
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "alsa",
+                    "-i",
+                    device,
+                    "-t",
+                    "0.1",
+                    "-ar",
+                    str(self.sample_rate),
+                    "-ac",
+                    "1",
+                    "-c:a",
+                    "pcm_s16le",
+                    test_file,
                 ],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if result.returncode == 0 and os.path.exists(test_file):
                 os.remove(test_file)
@@ -139,7 +153,9 @@ class EnhancedRxListenWorker(Worker):
         if self.recording:
             if (
                 self.recording_start_time
-                and (datetime.datetime.now() - self.recording_start_time).total_seconds()
+                and (
+                    datetime.datetime.now() - self.recording_start_time
+                ).total_seconds()
                 > self.max_recording_duration
             ):
                 self.logger.warning("Cleaning up stale recording")
@@ -167,9 +183,7 @@ class EnhancedRxListenWorker(Worker):
         if not self.recording or not self.recording_start_time:
             return
 
-        duration = (
-            datetime.datetime.now() - self.recording_start_time
-        ).total_seconds()
+        duration = (datetime.datetime.now() - self.recording_start_time).total_seconds()
         self.logger.info(f"Stopping recording after {duration:.1f}s")
 
         if self.recording_buffer:
@@ -218,14 +232,24 @@ class EnhancedRxListenWorker(Worker):
                 merged = self.recording_filepath.replace(".wav", "_merged.wav")
                 result = subprocess.run(
                     [
-                        "ffmpeg", "-y",
-                        "-i", self.pre_record_filepath,
-                        "-i", self.recording_filepath,
-                        "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1[a]",
-                        "-map", "[a]", "-c:a", "pcm_s16le", merged,
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        self.pre_record_filepath,
+                        "-i",
+                        self.recording_filepath,
+                        "-filter_complex",
+                        "[0:a][1:a]concat=n=2:v=0:a=1[a]",
+                        "-map",
+                        "[a]",
+                        "-c:a",
+                        "pcm_s16le",
+                        merged,
                     ],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                    text=True, timeout=15,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15,
                 )
                 if result.returncode != 0:
                     merged = self.recording_filepath
@@ -248,13 +272,26 @@ class EnhancedRxListenWorker(Worker):
             )
             result = subprocess.run(
                 [
-                    "ffmpeg", "-y", "-i", merged,
-                    "-filter_complex", filter_chain, "-map", "[a]",
-                    "-ar", str(self.sample_rate),
-                    "-c:a", "libopus", "-b:a", "64k", processed,
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    merged,
+                    "-filter_complex",
+                    filter_chain,
+                    "-map",
+                    "[a]",
+                    "-ar",
+                    str(self.sample_rate),
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "64k",
+                    processed,
                 ],
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True, timeout=30,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
             )
 
             if result.returncode != 0:
@@ -264,8 +301,18 @@ class EnhancedRxListenWorker(Worker):
             is_voice, analysis = self.voice_detector.analyze_recording(processed)
             self.logger.info(
                 f"Voice analysis: voice={is_voice}, "
-                f"ratio={analysis.get('voice_ratio', 0):.1%}, "
-                f"max_prob={analysis.get('max_probability', 0):.3f}"
+                f"ratio={analysis.get('voice_ratio', 0):.1%} "
+                f"(min={analysis.get('min_voice_ratio', 0):.1%}), "
+                f"max_prob={analysis.get('max_probability', 0):.3f} "
+                f"(min={analysis.get('min_max_probability', 0):.3f}), "
+                f"avg={analysis.get('avg_probability', 0):.3f} "
+                f"(min={analysis.get('min_avg_probability', 0):.3f}), "
+                f"std={analysis.get('std_probability', 0):.3f}, "
+                f"p50={analysis.get('p50', 0):.3f}, "
+                f"p90={analysis.get('p90', 0):.3f}, "
+                f"p95={analysis.get('p95', 0):.3f}, "
+                f"frames={analysis.get('voice_frames', 0)}/{analysis.get('total_frames', 0)}, "
+                f"duration={analysis.get('duration', 0):.1f}s"
             )
 
             if is_voice:
@@ -312,7 +359,9 @@ class EnhancedRxListenWorker(Worker):
                 self.silence_counter = 0
                 if (
                     self.recording_start_time
-                    and (datetime.datetime.now() - self.recording_start_time).total_seconds()
+                    and (
+                        datetime.datetime.now() - self.recording_start_time
+                    ).total_seconds()
                     > self.max_recording_duration
                 ):
                     self.logger.warning("Recording timeout, stopping")
@@ -345,6 +394,13 @@ class EnhancedRxListenWorker(Worker):
                 vad_flag=int(stats.get("vad_flag", 0)),
                 level_score=float(stats.get("level_score", 0)),
                 combined_score=float(stats.get("combined_score", 0)),
+                open_threshold=float(stats.get("open_threshold", 0)),
+                close_threshold=float(stats.get("close_threshold", 0)),
+                active_threshold=float(stats.get("active_threshold", 0)),
+                min_absolute_level=float(stats.get("min_absolute_level", 0)),
+                fast_noise_floor_db=float(stats.get("fast_noise_floor_db", 0)),
+                slow_noise_floor_db=float(stats.get("slow_noise_floor_db", 0)),
+                is_recording=self.recording,
                 avg_process_time_ms=float(stats.get("avg_process_time_ms", 0)),
                 max_process_time_ms=float(stats.get("max_process_time_ms", 0)),
             )
@@ -361,17 +417,34 @@ class EnhancedRxListenWorker(Worker):
             )
             if self._stream_audio_once():
                 break
-            time.sleep(min(2.0 * (2 ** attempt), 10))
+            time.sleep(min(2.0 * (2**attempt), 10))
         else:
             self.logger.error("All audio stream attempts failed")
 
     def _stream_audio_once(self):
         cmd = [
-            "ffmpeg", "-f", "alsa", "-thread_queue_size", "512",
-            "-i", self.audio_device, "-ac", "1", "-ar", str(self.sample_rate),
-            "-acodec", "pcm_s16le", "-fflags", "nobuffer",
-            "-flags", "low_delay", "-strict", "experimental",
-            "-f", "s16le", "-",
+            "ffmpeg",
+            "-f",
+            "alsa",
+            "-thread_queue_size",
+            "512",
+            "-i",
+            self.audio_device,
+            "-ac",
+            "1",
+            "-ar",
+            str(self.sample_rate),
+            "-acodec",
+            "pcm_s16le",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-strict",
+            "experimental",
+            "-f",
+            "s16le",
+            "-",
         ]
         process = None
         try:
@@ -445,7 +518,8 @@ class EnhancedRxListenWorker(Worker):
                 self.last_chunk_time = 0
                 self._audio_thread = threading.Thread(
                     target=self.process_audio_stream,
-                    daemon=True, name="AudioRestart",
+                    daemon=True,
+                    name="AudioRestart",
                 )
                 self._audio_thread.start()
             elif (
@@ -456,7 +530,8 @@ class EnhancedRxListenWorker(Worker):
                 self.logger.warning("Audio thread died, restarting")
                 self._audio_thread = threading.Thread(
                     target=self.process_audio_stream,
-                    daemon=True, name="AudioRestart",
+                    daemon=True,
+                    name="AudioRestart",
                 )
                 self._audio_thread.start()
 
