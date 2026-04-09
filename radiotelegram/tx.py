@@ -17,7 +17,13 @@ from radiotelegram.events import (
 class EnhancedTxPlayWorker(Worker):
     """Transmitter: processes and plays voice messages over radio."""
 
-    def __init__(self, bus, audio_output_device="pulse"):
+    def __init__(
+        self,
+        bus,
+        audio_output_device="pulse",
+        volume_control="PCM",
+        volume_level="100%",
+    ):
         super().__init__(bus)
 
         self.bus.subscribe(TelegramVoiceMessageDownloadedEvent, self.queue_event)
@@ -34,9 +40,13 @@ class EnhancedTxPlayWorker(Worker):
         self.limiter_ceiling = -1
         self.noise_reduction_amount = 8
         self.max_volume_enabled = True
-        self.volume_control_device = "PCM"
+        self.volume_control_device = volume_control
+        self.volume_level = volume_level
 
         self.logger.info(f"TX output device configured: {self.audio_output_device}")
+        self.logger.info(
+            f"TX ALSA gain: {self.volume_control_device} = {self.volume_level}"
+        )
 
     @property
     def _aplay_device(self):
@@ -137,7 +147,7 @@ class EnhancedTxPlayWorker(Worker):
             if self.audio_output_device and self.audio_output_device != "pulse":
                 card = self.audio_output_device.replace("hw:", "").split(",")[0]
                 cmd += ["-c", card]
-            cmd += ["sset", self.volume_control_device, "100%"]
+            cmd += ["sset", self.volume_control_device, self.volume_level]
             subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,

@@ -48,6 +48,26 @@ def _list_audio_devices():
             logger.warning(f"  Failed to list {label.lower()} devices: {e}")
 
 
+def _list_mixer_controls(device, label):
+    logger = logging.getLogger("audio_devices")
+    card = device.replace("hw:", "").replace("plughw:", "").split(",")[0]
+    logger.info(f"--- {label} mixer controls (card {card}) ---")
+    try:
+        result = subprocess.run(
+            ["amixer", "-c", card, "scontrols"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().split("\n"):
+                logger.info(f"  {line.strip()}")
+        else:
+            logger.info("  (no controls found)")
+    except Exception as e:
+        logger.warning(f"  Failed to list mixer controls: {e}")
+
+
 def main():
     load_dotenv()
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -55,16 +75,32 @@ def main():
     TOPIC_ID = int(os.getenv("TELEGRAM_TOPIC_ID", "0")) or None
     AUDIO_DEVICE = os.getenv("AUDIO_DEVICE", "pulse")
     AUDIO_OUTPUT_DEVICE = os.getenv("AUDIO_OUTPUT_DEVICE", "pulse")
+    TX_VOLUME_CONTROL = os.getenv("TX_VOLUME_CONTROL", "PCM")
+    TX_VOLUME = os.getenv("TX_VOLUME", "100%")
+    RX_VOLUME_CONTROL = os.getenv("RX_VOLUME_CONTROL", "Mic")
+    RX_VOLUME = os.getenv("RX_VOLUME", "100%")
     assert TELEGRAM_BOT_TOKEN and CHAT_ID
 
     _list_audio_devices()
+    _list_mixer_controls(AUDIO_DEVICE, "RX")
+    _list_mixer_controls(AUDIO_OUTPUT_DEVICE, "TX")
 
     bus = MessageBus(max_workers=6)
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
     workers = [
-        EnhancedRxListenWorker(bus, audio_device=AUDIO_DEVICE),
-        EnhancedTxPlayWorker(bus, audio_output_device=AUDIO_OUTPUT_DEVICE),
+        EnhancedRxListenWorker(
+            bus,
+            audio_device=AUDIO_DEVICE,
+            volume_control=RX_VOLUME_CONTROL,
+            volume_level=RX_VOLUME,
+        ),
+        EnhancedTxPlayWorker(
+            bus,
+            audio_output_device=AUDIO_OUTPUT_DEVICE,
+            volume_control=TX_VOLUME_CONTROL,
+            volume_level=TX_VOLUME,
+        ),
         TelegramMessageFetchWorker(bus, bot, chat_id=CHAT_ID, topic_id=TOPIC_ID),
         SendChatActionWorker(bus, bot, chat_id=CHAT_ID, topic_id=TOPIC_ID or 0),
         VoiceMessageUploadWorker(bus, bot, chat_id=CHAT_ID, topic_id=TOPIC_ID or 0),

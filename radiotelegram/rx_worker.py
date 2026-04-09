@@ -24,11 +24,21 @@ from radiotelegram.voice_detection import VoiceDetector
 
 
 class EnhancedRxListenWorker(Worker):
-    def __init__(self, bus, sample_rate=48000, chunk_size=256, audio_device="hw:1,0"):
+    def __init__(
+        self,
+        bus,
+        sample_rate=48000,
+        chunk_size=256,
+        audio_device="hw:1,0",
+        volume_control="Mic",
+        volume_level="100%",
+    ):
         super().__init__(bus)
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
         self.audio_device = audio_device
+        self.volume_control_device = volume_control
+        self.volume_level = volume_level
 
         # Recording
         self.silence_duration = 2.0
@@ -67,6 +77,10 @@ class EnhancedRxListenWorker(Worker):
         self.bus.subscribe(TxMessagePlaybackEndedEvent, self.on_playback_finished)
 
         self._probe_audio_device()
+
+        self.logger.info(
+            f"RX ALSA gain: {self.volume_control_device} = {self.volume_level}"
+        )
 
     # ── TX/RX coordination ─────────────────────────────────────
 
@@ -535,10 +549,38 @@ class EnhancedRxListenWorker(Worker):
                 )
                 self._audio_thread.start()
 
+    def _set_rx_volume(self):
+        try:
+            card = (
+                self.audio_device.replace("hw:", "")
+                .replace("plughw:", "")
+                .split(",")[0]
+            )
+            cmd = [
+                "amixer",
+                "-c",
+                card,
+                "sset",
+                self.volume_control_device,
+                self.volume_level,
+            ]
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                self.logger.warning(f"RX volume set failed: {result.stderr.strip()}")
+        except Exception as e:
+            self.logger.warning(f"Failed to set RX volume: {e}")
+
     # ── Lifecycle ──────────────────────────────────────────────
 
     def start(self):
         self.logger.info("RxListenWorker starting")
+        self._set_rx_volume()
         self._audio_thread = threading.Thread(
             target=self.process_audio_stream, daemon=True, name="AudioStream"
         )
