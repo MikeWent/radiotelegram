@@ -11,3 +11,9 @@ dependencies = [
     "scipy>=1.16.0",
     "ten-vad>=1.0.6",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-mock>=3.15.1",
+]
