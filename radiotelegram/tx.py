@@ -38,6 +38,13 @@ class EnhancedTxPlayWorker(Worker):
 
         self.logger.info(f"TX output device configured: {self.audio_output_device}")
 
+    @property
+    def _aplay_device(self):
+        """Convert hw:X,Y to plughw:X,Y for automatic format conversion."""
+        if self.audio_output_device.startswith("hw:"):
+            return self.audio_output_device.replace("hw:", "plughw:", 1)
+        return self.audio_output_device
+
     def on_recording_started(self, event):
         self.enabled = False
 
@@ -72,7 +79,7 @@ class EnhancedTxPlayWorker(Worker):
 
         try:
             self._play_wake_tone()
-            time.sleep(0.2)
+            time.sleep(0.5)
             self._play_audio_file(processed)
         finally:
             for f in [processed, filepath]:
@@ -143,63 +150,119 @@ class EnhancedTxPlayWorker(Worker):
 
     def _play_wake_tone(self):
         try:
-            cmd = [
-                "ffplay",
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "quiet",
-            ]
-            if self.audio_output_device and self.audio_output_device != "pulse":
-                cmd += ["-audio_device", self.audio_output_device]
-            cmd += [
-                "-f",
-                "lavfi",
-                "-i",
-                f"sine=frequency={self.wake_tone_frequency}:"
-                f"duration={self.wake_tone_duration}",
-            ]
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            ffmpeg = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"sine=frequency={self.wake_tone_frequency}:"
+                    f"duration={self.wake_tone_duration}",
+                    "-f",
+                    "s16le",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "1",
+                    "pipe:1",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+            aplay = subprocess.Popen(
+                [
+                    "aplay",
+                    "-D",
+                    self._aplay_device,
+                    "-f",
+                    "S16_LE",
+                    "-r",
+                    "48000",
+                    "-c",
+                    "1",
+                ],
+                stdin=ffmpeg.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            ffmpeg.stdout.close()
             try:
-                proc.wait(timeout=self.wake_tone_duration + 1.0)
+                aplay.wait(timeout=self.wake_tone_duration + 2.0)
+                ffmpeg.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                aplay.terminate()
+                ffmpeg.terminate()
+            finally:
+                for p in (aplay, ffmpeg):
+                    for s in (p.stdin, p.stdout, p.stderr):
+                        if s:
+                            try:
+                                s.close()
+                            except Exception:
+                                pass
+                    try:
+                        p.kill()
+                        p.wait(timeout=1.0)
+                    except Exception:
+                        pass
         except Exception as e:
             self.logger.error(f"Wake tone error: {e}")
 
     def _play_audio_file(self, filepath):
         try:
-            cmd = [
-                "ffplay",
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "quiet",
-            ]
-            if self.audio_output_device and self.audio_output_device != "pulse":
-                cmd += ["-audio_device", self.audio_output_device]
-            cmd += ["-af", "volume=0.8", filepath]
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            ffmpeg = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    filepath,
+                    "-af",
+                    "volume=0.8",
+                    "-f",
+                    "s16le",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "1",
+                    "pipe:1",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+            aplay = subprocess.Popen(
+                [
+                    "aplay",
+                    "-D",
+                    self._aplay_device,
+                    "-f",
+                    "S16_LE",
+                    "-r",
+                    "48000",
+                    "-c",
+                    "1",
+                ],
+                stdin=ffmpeg.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            ffmpeg.stdout.close()
             try:
-                proc.wait(timeout=self.timeout_seconds)
+                aplay.wait(timeout=self.timeout_seconds)
+                ffmpeg.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
-                proc.terminate()
+                aplay.terminate()
+                ffmpeg.terminate()
                 try:
-                    proc.wait(timeout=5.0)
+                    aplay.wait(timeout=5.0)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    aplay.kill()
+                    ffmpeg.kill()
+            stderr = aplay.stderr.read().decode(errors="replace").strip()
+            if stderr:
+                self.logger.warning(f"Playback aplay: {stderr}")
         except Exception as e:
             self.logger.error(f"Playback error: {e}")
 

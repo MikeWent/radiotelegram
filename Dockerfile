@@ -41,7 +41,8 @@ COPY README.md ./
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-ENV AUDIO_DEVICE=hw:1,0
+ENV AUDIO_DEVICE=hw:0,0
+ENV AUDIO_OUTPUT_DEVICE=hw:0,0
 
 # Default command
 CMD ["uv", "run", "python", "-m", "radiotelegram.main"]
