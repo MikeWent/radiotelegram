@@ -552,8 +552,8 @@ class EnhancedRxListenWorker(Worker):
     def _set_rx_volume(self):
         try:
             card = (
-                self.audio_device.replace("hw:", "")
-                .replace("plughw:", "")
+                self.audio_device.replace("plughw:", "")
+                .replace("hw:", "")
                 .split(",")[0]
             )
             cmd = [
