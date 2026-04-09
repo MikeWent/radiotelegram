@@ -1,30 +1,26 @@
-"""Voice detection functionality using TEN-VAD."""
+"""Voice detection using TEN-VAD for post-recording analysis."""
 
 import os
 import subprocess
-from typing import Tuple
 
 import numpy as np
 from scipy.io import wavfile
 from ten_vad import TenVad
 
-from radiotelegram.bus import cpu_intensive
-
-# TEN-VAD operates at 16kHz
 _TEN_VAD_SAMPLE_RATE = 16000
 
 
 class VoiceDetector:
-    """Analyzes recorded audio to determine if it contains voice using TEN-VAD."""
+    """Analyzes recorded audio to determine if it contains voice."""
 
     def __init__(
         self,
-        sample_rate: int = 48000,
-        hop_size: int = 256,
-        threshold: float = 0.5,
-        min_voice_ratio: float = 0.05,
-        min_max_probability: float = 0.75,
-        min_analysis_duration: float = 0.5,
+        sample_rate=48000,
+        hop_size=256,
+        threshold=0.5,
+        min_voice_ratio=0.05,
+        min_max_probability=0.60,
+        min_analysis_duration=0.25,
     ):
         self.sample_rate = sample_rate
         self.hop_size = hop_size
@@ -34,17 +30,8 @@ class VoiceDetector:
         self.min_analysis_duration = min_analysis_duration
         self.vad = TenVad(hop_size=hop_size, threshold=threshold)
 
-    @cpu_intensive
-    def analyze_recording(self, filepath: str) -> Tuple[bool, dict]:
-        """
-        Analyze a recording to determine if it contains voice.
-
-        Returns:
-            is_voice: True if recording contains voice
-            analysis: Dictionary with detailed analysis results
-        """
+    def analyze_recording(self, filepath):
         try:
-            # Use ffmpeg to convert any format to 16kHz mono s16le wav
             temp_wav = filepath + "_vad.wav"
             result = subprocess.run(
                 [
@@ -63,7 +50,6 @@ class VoiceDetector:
                 capture_output=True,
                 text=True,
             )
-
             if result.returncode != 0:
                 return False, {"error": "Failed to convert audio"}
 
@@ -72,16 +58,13 @@ class VoiceDetector:
             finally:
                 os.remove(temp_wav)
 
-            # Ensure mono
             if len(audio_data.shape) > 1:
                 audio_data = audio_data[:, 0]
 
             duration = len(audio_data) / _TEN_VAD_SAMPLE_RATE
-
             if duration < self.min_analysis_duration:
                 return False, {"error": "Recording too short for analysis"}
 
-            # Process through TEN-VAD frame by frame
             total_frames = 0
             voice_frames = 0
             probabilities = []
@@ -106,7 +89,7 @@ class VoiceDetector:
                 and max_probability > self.min_max_probability
             )
 
-            analysis = {
+            return bool(is_voice), {
                 "duration": duration,
                 "voice_ratio": voice_ratio,
                 "avg_probability": avg_probability,
@@ -115,8 +98,5 @@ class VoiceDetector:
                 "total_frames": total_frames,
                 "is_voice": is_voice,
             }
-
-            return bool(is_voice), analysis
-
         except Exception as e:
             return False, {"error": f"Analysis failed: {str(e)}"}

@@ -1,6 +1,5 @@
 """Tests for radiotelegram.main module."""
 
-import signal
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -8,7 +7,6 @@ import pytest
 
 
 class TestMain:
-    @patch("radiotelegram.main.threading.Thread")
     @patch("radiotelegram.main.TelegramBotPollingWorker")
     @patch("radiotelegram.main.VoiceMessageUploadWorker")
     @patch("radiotelegram.main.SendChatActionWorker")
@@ -38,15 +36,12 @@ class TestMain:
         mock_action,
         mock_upload,
         mock_polling,
-        mock_thread,
     ):
         from radiotelegram.main import main
 
-        # Make shutdown_flag.wait raise KeyboardInterrupt to exit the loop
         mock_bus = MagicMock()
         mock_bus_cls.return_value = mock_bus
 
-        # Mock threading.Event to break the main loop
         original_event = threading.Event
 
         class FakeEvent(original_event):

@@ -4,7 +4,7 @@ import threading
 import time
 from typing import Optional
 
-from radiotelegram.bus import MessageBus, Worker, cpu_intensive
+from radiotelegram.bus import MessageBus, Worker
 from radiotelegram.events import (
     RxRecordingEndedEvent,
     RxRecordingStartedEvent,
@@ -15,288 +15,168 @@ from radiotelegram.events import (
 
 
 class EnhancedTxPlayWorker(Worker):
-    """Enhanced transmitter worker with advanced audio processing."""
+    """Transmitter: processes and plays voice messages over radio."""
 
-    def __init__(self, bus: MessageBus):
+    def __init__(self, bus):
         super().__init__(bus)
 
-        # Event subscriptions
         self.bus.subscribe(TelegramVoiceMessageDownloadedEvent, self.queue_event)
         self.bus.subscribe(RxRecordingStartedEvent, self.on_recording_started)
         self.bus.subscribe(RxRecordingEndedEvent, self.on_recording_finished)
 
-        # Playback configuration
-        self.enabled = True
         self.timeout_seconds = 30
-        self.wake_tone_frequency = 1750  # Hz - better for radio transmission
-        self.wake_tone_duration = 0.3  # seconds
-        self.post_tx_delay = 2.5  # seconds for radio to return to RX mode
+        self.wake_tone_frequency = 1750
+        self.wake_tone_duration = 0.3
+        self.post_tx_delay = 2.5
 
-        # Audio processing parameters
-        self.target_lufs = -16  # Loudness target
-        self.limiter_ceiling = -1  # dB - prevent clipping
-        self.compressor_ratio = 3.0  # Compression ratio
-        self.noise_reduction_amount = 8  # dB of noise reduction
-
-        # Volume control
-        self.max_volume_enabled = True  # Enable automatic volume maximization
-        self.volume_control_device = "PCM"  # ALSA mixer control name
+        self.target_lufs = -16
+        self.limiter_ceiling = -1
+        self.noise_reduction_amount = 8
+        self.max_volume_enabled = True
+        self.volume_control_device = "PCM"
 
         self._log_output_device_info()
 
     def _log_output_device_info(self):
-        """Log information about the default playback device."""
         try:
-            # Get the default ALSA playback device info
             result = subprocess.run(
-                ["aplay", "-l"],
-                capture_output=True,
-                text=True,
-                timeout=5,
+                ["aplay", "-l"], capture_output=True, text=True, timeout=5
             )
-            if result.returncode == 0 and result.stdout.strip():
-                # Find the default card (card 0) or first available
+            if result.returncode == 0:
                 for line in result.stdout.strip().split("\n"):
                     if line.startswith("card "):
                         self.logger.info(f"TX output device: {line.strip()}")
                         break
         except Exception as e:
-            self.logger.warning(f"Failed to query TX output device info: {e}")
+            self.logger.warning(f"Failed to query TX output device: {e}")
 
-    def on_recording_started(self, event: RxRecordingStartedEvent):
-        """Disable playback when recording starts to prevent interference."""
+    def on_recording_started(self, event):
         self.enabled = False
-        self.logger.debug("TX disabled - RX recording started")
 
-    def on_recording_finished(self, event: RxRecordingEndedEvent):
-        """Enable playback when recording ends."""
+    def on_recording_finished(self, event):
         self.enabled = True
-        self.logger.debug("TX enabled - RX recording ended")
 
-    def handle_event(self, event: TelegramVoiceMessageDownloadedEvent):
-        """Handle incoming voice message for transmission."""
+    def handle_event(self, event):
         if not self.enabled:
-            self.logger.info(f"TX disabled, queuing message: {event.filepath}")
-            # Re-queue the event to try later
+            self.logger.info(f"TX disabled, re-queuing: {event.filepath}")
             time.sleep(1.0)
             self.queue_event(event)
             return
 
-        self.logger.info(f"Processing voice message for TX: {event.filepath}")
+        self.logger.info(f"TX playing: {event.filepath}")
         self.bus.publish(TxMessagePlaybackStartedEvent())
-
         try:
             self.play_enhanced_audio(event.filepath)
         except Exception as e:
-            self.logger.error(f"Error during enhanced playback: {e}")
+            self.logger.error(f"Playback error: {e}")
         finally:
             time.sleep(self.post_tx_delay)
             self.bus.publish(TxMessagePlaybackEndedEvent())
 
-    def play_enhanced_audio(self, filepath: str):
-        """Play audio with enhanced processing optimized for radio transmission."""
-
-        # Step 1: Set maximum volume
+    def play_enhanced_audio(self, filepath):
         if self.max_volume_enabled:
             self._set_max_volume()
 
-        # Step 2: Pre-process the audio for radio transmission
-        processed_filepath = self._preprocess_for_radio(filepath)
-
-        if not processed_filepath:
-            self.logger.error("Failed to preprocess audio")
+        processed = self._preprocess_for_radio(filepath)
+        if not processed:
+            self.logger.error("Preprocessing failed")
             return
 
         try:
-            # Step 3: Generate wake tone to activate radio TX
             self._play_wake_tone()
-
-            # Step 4: Small delay for radio to fully key up
             time.sleep(0.2)
-
-            # Step 5: Play the processed audio
-            self._play_audio_file(processed_filepath)
-
+            self._play_audio_file(processed)
         finally:
-            # Clean up processed file
-            if os.path.exists(processed_filepath):
-                os.remove(processed_filepath)
-            # Clean up original file
-            if os.path.exists(filepath):
-                os.remove(filepath)
+            for f in [processed, filepath]:
+                if os.path.exists(f):
+                    os.remove(f)
 
-    @cpu_intensive
-    def _preprocess_for_radio(self, input_filepath: str) -> Optional[str]:
-        """
-        Apply comprehensive audio processing optimized for radio transmission.
-
-        Returns path to processed file, or None if processing failed.
-        """
+    def _preprocess_for_radio(self, input_filepath) -> Optional[str]:
         try:
-            processed_filepath = input_filepath.replace(".ogg", "_radio_processed.ogg")
-
-            # Comprehensive filter chain for radio transmission
+            out = input_filepath.replace(".ogg", "_radio_processed.ogg")
             filter_complex = (
                 "[0:a]"
-                # 1. Normalize input level
                 "loudnorm=I=-23:LRA=7:TP=-2:offset=0,"
-                # 2. High-pass filter to remove rumble and handling noise
                 "highpass=f=200:poles=2,"
-                # 3. Pre-emphasis for radio transmission (boost highs)
                 "treble=g=3:f=1000:width_type=h:width=1000,"
-                # 4. Bandpass filter optimized for radio voice
                 "lowpass=f=3000:poles=2,"
-                # 5. Dynamic range compression for consistent levels
-                "compand=attacks=0.003:decays=0.1:points=-80/-80|-43/-43|-30/-25|-18/-15:soft-knee=6:gain=0:volume=-90,"
-                # 6. Gentle noise reduction
+                "compand=attacks=0.003:decays=0.1:"
+                "points=-80/-80|-43/-43|-30/-25|-18/-15:"
+                "soft-knee=6:gain=0:volume=-90,"
                 f"afftdn=nr={self.noise_reduction_amount}:nf=-40:tn=1,"
-                # 7. Peak limiter to prevent overmodulation
-                f"alimiter=level_in=1:level_out=1:limit={self.limiter_ceiling}dB:attack=3:release=20,"
-                # 8. Final loudness normalization for consistent TX levels
+                f"alimiter=level_in=1:level_out=1:limit={self.limiter_ceiling}dB:"
+                "attack=3:release=20,"
                 f"loudnorm=I={self.target_lufs}:LRA=5:TP=-1[a]"
             )
-
-            command = [
-                "ffmpeg",
-                "-y",
-                "-i",
-                input_filepath,
-                "-filter_complex",
-                filter_complex,
-                "-map",
-                "[a]",
-                "-ar",
-                "48000",
-                "-c:a",
-                "libopus",
-                "-b:a",
-                "96k",  # Higher quality for TX
-                processed_filepath,
-            ]
-
-            self.logger.debug(f"Preprocessing audio with command: {' '.join(command)}")
-
             result = subprocess.run(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=30,
+                [
+                    "ffmpeg", "-y", "-i", input_filepath,
+                    "-filter_complex", filter_complex, "-map", "[a]",
+                    "-ar", "48000", "-c:a", "libopus", "-b:a", "96k", out,
+                ],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True, timeout=30,
             )
-
-            if result.returncode == 0:
-                self.logger.debug("Audio preprocessing completed successfully")
-                return processed_filepath
-            else:
-                self.logger.error(f"FFmpeg preprocessing failed: {result.stderr}")
-                return None
-
+            return out if result.returncode == 0 else None
         except Exception as e:
-            self.logger.error(f"Error in audio preprocessing: {e}")
+            self.logger.error(f"Preprocessing error: {e}")
             return None
 
     def _set_max_volume(self):
-        """Set the soundcard volume to maximum using amixer."""
         try:
-            # Try to set the Master volume to 100%
-            result = subprocess.run(
+            subprocess.run(
                 ["amixer", "sset", self.volume_control_device, "100%"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=5,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=5,
             )
-
-            if result.returncode == 0:
-                self.logger.debug(
-                    f"Volume set to maximum for {self.volume_control_device}"
-                )
-            else:
-                self.logger.warning(f"Failed to set volume: {result.stderr}")
-
-        except subprocess.TimeoutExpired:
-            self.logger.warning("Volume control command timed out")
-        except FileNotFoundError:
-            self.logger.warning("amixer not found - volume control disabled")
-        except Exception as e:
-            self.logger.error(f"Error setting volume: {e}")
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            pass
 
     def _play_wake_tone(self):
-        """Play a wake-up tone to activate radio PTT reliably."""
         try:
-            # Generate and play wake tone
-            process = subprocess.Popen(
+            proc = subprocess.Popen(
                 [
-                    "ffplay",
-                    "-nodisp",
-                    "-autoexit",
-                    "-loglevel",
-                    "quiet",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    f"sine=frequency={self.wake_tone_frequency}:duration={self.wake_tone_duration}",
+                    "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
+                    "-f", "lavfi", "-i",
+                    f"sine=frequency={self.wake_tone_frequency}:"
+                    f"duration={self.wake_tone_duration}",
                 ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-
             try:
-                process.wait(timeout=self.wake_tone_duration + 1.0)
-                self.logger.debug(
-                    f"Wake tone played: {self.wake_tone_frequency}Hz for {self.wake_tone_duration}s"
-                )
+                proc.wait(timeout=self.wake_tone_duration + 1.0)
             except subprocess.TimeoutExpired:
-                self.logger.warning("Wake tone playback timeout")
+                proc.terminate()
                 try:
-                    process.terminate()
-                    process.wait(timeout=5)
+                    proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-
+                    proc.kill()
         except Exception as e:
-            self.logger.error(f"Error playing wake tone: {e}")
+            self.logger.error(f"Wake tone error: {e}")
 
-    def _play_audio_file(self, filepath: str):
-        """Play processed audio file with timeout protection."""
+    def _play_audio_file(self, filepath):
         try:
-            process = subprocess.Popen(
+            proc = subprocess.Popen(
                 [
-                    "ffplay",
-                    "-nodisp",
-                    "-autoexit",
-                    "-loglevel",
-                    "quiet",
-                    "-af",
-                    "volume=0.8",  # Slight volume reduction for safety
-                    filepath,
+                    "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet",
+                    "-af", "volume=0.8", filepath,
                 ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-
             try:
-                process.wait(timeout=self.timeout_seconds)
-                self.logger.debug(f"Audio playback completed: {filepath}")
+                proc.wait(timeout=self.timeout_seconds)
             except subprocess.TimeoutExpired:
-                self.logger.warning(f"Playback timeout for {filepath}, terminating")
-                process.terminate()
+                proc.terminate()
                 try:
-                    process.wait(timeout=5.0)
+                    proc.wait(timeout=5.0)
                 except subprocess.TimeoutExpired:
-                    self.logger.warning("Force killing playback process")
-                    process.kill()
-                    process.wait()
-
+                    proc.kill()
         except Exception as e:
-            self.logger.error(f"Error playing audio file {filepath}: {e}")
+            self.logger.error(f"Playback error: {e}")
 
     def start(self):
-        """Start processing the queue."""
-        # Start the queue processing thread
-        self._processing_thread = threading.Thread(
-            target=self.process_queue, name=f"{self.__class__.__name__}ProcessingThread"
+        t = threading.Thread(
+            target=self.process_queue, daemon=True,
+            name=f"{self.__class__.__name__}Queue",
         )
-        self._processing_thread.daemon = True
-        self._processing_thread.start()
+        t.start()

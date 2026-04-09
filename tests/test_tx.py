@@ -1,12 +1,4 @@
-"""Tests for radiotelegram.tx — radio transmission pipeline.
-
-Verifies:
-  - TX/RX mutual exclusion: TX disabled during RX recording
-  - Playback lifecycle: publishes start/end events, re-queues when disabled
-  - Preprocessing failure aborts the playback pipeline
-  - Full happy-path: volume → preprocess → wake tone → play → cleanup
-  - Error resilience: amixer missing, ffplay timeout
-"""
+"""Tests for radiotelegram.tx — radio transmission pipeline."""
 
 import subprocess
 import time
@@ -38,12 +30,8 @@ def worker(bus):
         return_value=MagicMock(returncode=0, stdout=""),
     ):
         from radiotelegram.tx import EnhancedTxPlayWorker
-
         w = EnhancedTxPlayWorker(bus)
     return w
-
-
-# ── TX/RX mutual exclusion ───────────────────────────────────────
 
 
 class TestTxRxMutualExclusion:
@@ -57,21 +45,16 @@ class TestTxRxMutualExclusion:
         assert worker.enabled is True
 
 
-# ── Playback lifecycle ───────────────────────────────────────────
-
-
 class TestPlaybackLifecycle:
     @patch("radiotelegram.tx.time.sleep")
     def test_handle_event_brackets_playback_with_events(self, mock_sleep, bus, worker):
         started, ended = [], []
         bus.subscribe(TxMessagePlaybackStartedEvent, started.append)
         bus.subscribe(TxMessagePlaybackEndedEvent, ended.append)
-
         with patch.object(worker, "play_enhanced_audio"):
             worker.handle_event(
                 TelegramVoiceMessageDownloadedEvent(filepath="/tmp/v.ogg")
             )
-
         time.sleep(0.3)
         assert len(started) == 1
         assert len(ended) == 1
@@ -88,19 +71,14 @@ class TestPlaybackLifecycle:
     def test_playback_error_still_publishes_end_event(self, mock_sleep, bus, worker):
         ended = []
         bus.subscribe(TxMessagePlaybackEndedEvent, ended.append)
-
         with patch.object(
             worker, "play_enhanced_audio", side_effect=RuntimeError("boom")
         ):
             worker.handle_event(
                 TelegramVoiceMessageDownloadedEvent(filepath="/tmp/v.ogg")
             )
-
         time.sleep(0.3)
-        assert len(ended) == 1  # end event guarantees RX can re-enable
-
-
-# ── Preprocessing pipeline ───────────────────────────────────────
+        assert len(ended) == 1
 
 
 class TestPreprocessing:
@@ -127,9 +105,7 @@ class TestPlayEnhancedAudioFlow:
     @patch("radiotelegram.tx.os.path.exists", return_value=True)
     @patch("radiotelegram.tx.os.remove")
     @patch("radiotelegram.tx.time.sleep")
-    def test_preprocess_failure_skips_wake_tone_and_playback(
-        self, mock_sleep, mock_rm, mock_exists, worker
-    ):
+    def test_preprocess_failure_skips_playback(self, mock_sleep, mock_rm, mock_exists, worker):
         with (
             patch.object(worker, "_set_max_volume"),
             patch.object(worker, "_preprocess_for_radio", return_value=None),
@@ -146,9 +122,7 @@ class TestPlayEnhancedAudioFlow:
     def test_happy_path_runs_all_stages(self, mock_sleep, mock_rm, mock_exists, worker):
         with (
             patch.object(worker, "_set_max_volume") as vol,
-            patch.object(
-                worker, "_preprocess_for_radio", return_value="/tmp/p.ogg"
-            ) as pre,
+            patch.object(worker, "_preprocess_for_radio", return_value="/tmp/p.ogg") as pre,
             patch.object(worker, "_play_wake_tone") as tone,
             patch.object(worker, "_play_audio_file") as play,
         ):
@@ -159,13 +133,10 @@ class TestPlayEnhancedAudioFlow:
         play.assert_called_once()
 
 
-# ── Error resilience ─────────────────────────────────────────────
-
-
 class TestErrorResilience:
     def test_amixer_missing_does_not_crash(self, worker):
         with patch("radiotelegram.tx.subprocess.run", side_effect=FileNotFoundError):
-            worker._set_max_volume()  # must not raise
+            worker._set_max_volume()
 
     def test_ffplay_timeout_terminates_process(self, worker):
         proc = MagicMock()
