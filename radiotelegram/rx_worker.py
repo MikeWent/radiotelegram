@@ -70,7 +70,9 @@ class EnhancedRxListenWorker(Worker):
         # Streaming
         self.streaming_process = None
         self.last_chunk_time = 0
+        self.stream_start_time = 0
         self._audio_thread = None
+        self._stream_lock = threading.Lock()
 
         # Events
         self.bus.subscribe(TxMessagePlaybackStartedEvent, self.on_playback_started)
@@ -89,14 +91,12 @@ class EnhancedRxListenWorker(Worker):
         if self.recording:
             self.logger.info("Stopping recording due to TX playback")
             self.stop_recording()
+        self._stop_streaming_process()
 
     def on_playback_finished(self, event):
         self.enabled = True
         self.logger.info("TX finished, restarting audio stream")
-        t = threading.Thread(
-            target=self.process_audio_stream, daemon=True, name="AudioStreamThread"
-        )
-        t.start()
+        self._start_audio_thread("AudioStream")
 
     # ── Device probing ─────────────────────────────────────────
 
@@ -422,9 +422,36 @@ class EnhancedRxListenWorker(Worker):
 
     # ── FFmpeg audio streaming ─────────────────────────────────
 
+    def _start_audio_thread(self, name):
+        with self._stream_lock:
+            if self._stop_event.is_set():
+                return False
+            if self._audio_thread and self._audio_thread.is_alive():
+                return False
+            self._audio_thread = threading.Thread(
+                target=self.process_audio_stream,
+                daemon=True,
+                name=name,
+            )
+            self._audio_thread.start()
+            return True
+
+    def _stop_streaming_process(self):
+        process = self.streaming_process
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+
     def process_audio_stream(self):
         for attempt in range(5):
-            if not self.enabled:
+            if self._stop_event.is_set() or not self.enabled:
                 return
             self.logger.info(
                 f"Audio stream attempt {attempt + 1}/5 on {self.audio_device}"
@@ -466,6 +493,7 @@ class EnhancedRxListenWorker(Worker):
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0
             )
             self.streaming_process = process
+            self.stream_start_time = time.time()
             if not process.stdout:
                 return False
 
@@ -473,7 +501,7 @@ class EnhancedRxListenWorker(Worker):
             audio_buffer = bytearray()
             chunks_ok = 0
 
-            while self.enabled:
+            while self.enabled and not self._stop_event.is_set():
                 if process.poll() is not None:
                     _, stderr = process.communicate(timeout=1)
                     self.logger.warning(
@@ -511,17 +539,20 @@ class EnhancedRxListenWorker(Worker):
                 except subprocess.TimeoutExpired:
                     process.kill()
             self.streaming_process = None
+            self.stream_start_time = 0
 
     # ── Watchdog ───────────────────────────────────────────────
 
     def _watchdog(self):
-        while self.enabled:
+        while not self._stop_event.is_set():
             time.sleep(5.0)
-            if (
-                self.last_chunk_time
-                and time.time() - self.last_chunk_time > 30
-                and self.enabled
-            ):
+            if not self.enabled:
+                continue
+
+            now = time.time()
+            last_audio_time = self.last_chunk_time or self.stream_start_time
+
+            if last_audio_time and now - last_audio_time > 30:
                 self.logger.warning("Audio stream stalled, restarting")
                 if self.streaming_process and self.streaming_process.poll() is None:
                     self.streaming_process.kill()
@@ -530,24 +561,15 @@ class EnhancedRxListenWorker(Worker):
                     except subprocess.TimeoutExpired:
                         pass
                 self.last_chunk_time = 0
-                self._audio_thread = threading.Thread(
-                    target=self.process_audio_stream,
-                    daemon=True,
-                    name="AudioRestart",
-                )
-                self._audio_thread.start()
+                self.stream_start_time = 0
+                self._start_audio_thread("AudioRestart")
             elif (
                 self._audio_thread
                 and not self._audio_thread.is_alive()
                 and self.enabled
             ):
                 self.logger.warning("Audio thread died, restarting")
-                self._audio_thread = threading.Thread(
-                    target=self.process_audio_stream,
-                    daemon=True,
-                    name="AudioRestart",
-                )
-                self._audio_thread.start()
+                self._start_audio_thread("AudioRestart")
 
     def _set_rx_volume(self):
         try:
@@ -581,10 +603,7 @@ class EnhancedRxListenWorker(Worker):
     def start(self):
         self.logger.info("RxListenWorker starting")
         self._set_rx_volume()
-        self._audio_thread = threading.Thread(
-            target=self.process_audio_stream, daemon=True, name="AudioStream"
-        )
-        self._audio_thread.start()
+        self._start_audio_thread("AudioStream")
         threading.Thread(
             target=self._watchdog, daemon=True, name="AudioWatchdog"
         ).start()
@@ -594,11 +613,6 @@ class EnhancedRxListenWorker(Worker):
         self.enabled = False
         if self.recording:
             self.stop_recording()
-        if self.streaming_process and self.streaming_process.poll() is None:
-            self.streaming_process.terminate()
-            try:
-                self.streaming_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.streaming_process.kill()
+        self._stop_streaming_process()
         self.streaming_process = None
         super().stop()

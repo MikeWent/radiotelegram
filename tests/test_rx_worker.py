@@ -57,12 +57,29 @@ class TestTxRxCoordination:
             self.w.on_playback_finished(TxMessagePlaybackEndedEvent())
         assert self.w.enabled is True
 
+    def test_playback_end_does_not_start_duplicate_audio_thread(self):
+        self.w.enabled = False
+        self.w._audio_thread = MagicMock()
+        self.w._audio_thread.is_alive.return_value = True
+        with patch("radiotelegram.rx_worker.threading.Thread") as thread_cls:
+            self.w.on_playback_finished(TxMessagePlaybackEndedEvent())
+        assert self.w.enabled is True
+        thread_cls.assert_not_called()
+
     def test_playback_during_recording_aborts_it(self):
         self.w.recording = True
         with patch.object(self.w, "stop_recording") as stop:
             self.w.on_playback_started(TxMessagePlaybackStartedEvent())
         stop.assert_called_once()
         assert self.w.enabled is False
+
+    def test_playback_started_stops_active_stream_process(self):
+        proc = MagicMock()
+        proc.poll.return_value = None
+        self.w.streaming_process = proc
+        self.w.on_playback_started(TxMessagePlaybackStartedEvent())
+        proc.terminate.assert_called_once()
+        proc.wait.assert_called_once()
 
 
 # ── Recording lifecycle ──────────────────────────────────────────
@@ -249,3 +266,42 @@ class TestStatsPublishing:
         time.sleep(0.3)
         assert len(received) == 1
         assert received[0].squelch_open is True
+
+
+# ── Watchdog lifecycle ─────────────────────────────────────────────
+
+
+class TestWatchdogLifecycle:
+    def setup_method(self):
+        self.bus = MessageBus()
+        self.w = EnhancedRxListenWorker(self.bus)
+
+    def teardown_method(self):
+        self.w.stop()
+        self.bus.shutdown()
+
+    def test_watchdog_survives_tx_disable_and_restarts_after_re_enable(self):
+        self.w.enabled = False
+        self.w._audio_thread = MagicMock()
+        self.w._audio_thread.is_alive.return_value = False
+        started = []
+        sleep_count = 0
+
+        def fake_sleep(seconds):
+            nonlocal sleep_count
+            sleep_count += 1
+            if sleep_count == 2:
+                self.w.enabled = True
+
+        def fake_start(name):
+            started.append(name)
+            self.w._stop_event.set()
+            return True
+
+        with (
+            patch("radiotelegram.rx_worker.time.sleep", side_effect=fake_sleep),
+            patch.object(self.w, "_start_audio_thread", side_effect=fake_start),
+        ):
+            self.w._watchdog()
+
+        assert started == ["AudioRestart"]
