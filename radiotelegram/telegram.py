@@ -1,54 +1,54 @@
 import os
-import time
 import threading
-from typing import Optional
+import time
 
-import telebot
 from telebot import types
-from telebot.apihelper import ApiTelegramException
 
-from radiotelegram.bus import MessageBus, Worker
+from radiotelegram.bus import Worker
 from radiotelegram.events import (
     RxRecordingCompleteEvent,
     RxRecordingEndedEvent,
     RxRecordingStartedEvent,
     TelegramVoiceMessageDownloadedEvent,
 )
+from radiotelegram.telegram_retry import (
+    TelegramRetry,
+    is_retryable_telegram_error,
+    robust_telegram_call,
+    telegram_call,
+)
 
 
-def robust_telegram_call(func, logger, max_retries=3, base_delay=2):
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except ApiTelegramException as e:
-            if e.error_code == 429:
-                retry_after = getattr(e, "retry_after", base_delay * (2**attempt))
-                logger.warning(f"Rate limited. Waiting {retry_after}s")
-                time.sleep(retry_after)
-            elif e.error_code in [502, 503, 504] and attempt < max_retries - 1:
-                delay = base_delay * (2**attempt)
-                logger.warning(f"Server error {e.error_code}. Retrying in {delay}s")
-                time.sleep(delay)
-            else:
-                raise
-        except (ConnectionError, TimeoutError, OSError) as e:
-            if isinstance(e, (FileNotFoundError, PermissionError)):
-                raise
-            if attempt < max_retries - 1:
-                delay = base_delay * (2**attempt)
-                logger.warning(f"Network error: {e}. Retrying in {delay}s")
-                time.sleep(delay)
-            else:
-                raise
-    return None
+CHAT_ACTION_RETRY = TelegramRetry(2, 1, 5, False)
+BOT_ID_RETRY = TelegramRetry(2, 1, 5, False)
+DOWNLOAD_RETRY = TelegramRetry(3, 2, 15, False)
+UPLOAD_RETRY = TelegramRetry(3, 2, 15)
 
 
-class SendChatActionWorker(Worker):
-    def __init__(self, bus, bot, chat_id, topic_id):
+def _start_daemon(target, name):
+    thread = threading.Thread(target=target, daemon=True, name=name)
+    thread.start()
+    return thread
+
+
+class TelegramWorker(Worker):
+    def __init__(self, bus, bot, chat_id=None, topic_id=0):
         super().__init__(bus)
         self.bot = bot
         self.chat_id = chat_id
         self.topic_id = topic_id
+
+    @property
+    def api_topic_id(self):
+        return self.topic_id if self.topic_id != 0 else None
+
+    def call(self, func, policy):
+        return telegram_call(func, self.logger, policy, self._stop_event)
+
+
+class SendChatActionWorker(TelegramWorker):
+    def __init__(self, bus, bot, chat_id, topic_id):
+        super().__init__(bus, bot, chat_id, topic_id)
         self.active = False
         self.recording_start_time = None
         self.bus.subscribe(RxRecordingStartedEvent, self.on_recording_started)
@@ -64,177 +64,233 @@ class SendChatActionWorker(Worker):
 
     def _run_loop(self):
         while not self._stop_event.is_set():
-            if self.active:
-                elapsed = time.time() - (self.recording_start_time or 0)
-                if elapsed >= 3:
-                    try:
-                        robust_telegram_call(
-                            lambda: self.bot.send_chat_action(
-                                chat_id=self.chat_id,
-                                action="record_voice",
-                                message_thread_id=(
-                                    self.topic_id if self.topic_id != 0 else None
-                                ),
-                                timeout=15,
-                            ),
-                            self.logger,
-                        )
-                    except Exception:
-                        pass
-                    time.sleep(5)
-                else:
-                    time.sleep(1)
+            if not self.active:
+                self._stop_event.wait(0.1)
+            elif time.time() - (self.recording_start_time or 0) < 3:
+                self._stop_event.wait(1)
             else:
-                time.sleep(0.1)
+                self._send_chat_action()
+                self._stop_event.wait(5)
+
+    def _send_chat_action(self):
+        self.call(
+            lambda: self.bot.send_chat_action(
+                chat_id=self.chat_id,
+                action="record_voice",
+                message_thread_id=self.api_topic_id,
+                timeout=15,
+            ),
+            CHAT_ACTION_RETRY,
+        )
 
     def start(self):
-        threading.Thread(
-            target=self._run_loop, daemon=True, name="ChatActionLoop"
-        ).start()
-
-    def stop(self):
-        super().stop()
+        _start_daemon(self._run_loop, "ChatActionLoop")
 
 
-class TelegramMessageFetchWorker(Worker):
+class TelegramMessageFetchWorker(TelegramWorker):
     def __init__(self, bus, bot, chat_id, topic_id):
-        super().__init__(bus)
-        self.bot = bot
-        self.chat_id = chat_id
-        self.topic_id = topic_id
+        super().__init__(bus, bot, chat_id, topic_id)
         self._bot_id = None
 
     def start(self):
         @self.bot.message_handler(content_types=["voice"])
         def handle_voice_message(message: types.Message):
-            try:
-                if self._bot_id is None:
-                    self._bot_id = self.bot.get_me().id
+            self._handle_voice_message(message)
 
-                if not (
-                    str(message.chat.id) == self.chat_id
-                    and message.from_user
-                    and message.from_user.id != self._bot_id
-                    and (
-                        self.topic_id is None
-                        or message.message_thread_id == self.topic_id
-                    )
-                ):
-                    return
-
-                if not (message.voice and message.voice.file_id):
-                    return
-
+    def _handle_voice_message(self, message):
+        try:
+            if not self._message_allowed(message):
+                return
+            data = self._download_voice(message.voice.file_id)
+            if data:
                 filepath = f"/tmp/voice_{message.message_id}.ogg"
+                self._save_voice(filepath, data)
+                self.logger.info(f"Downloaded voice message: {filepath}")
+                self.bus.publish(TelegramVoiceMessageDownloadedEvent(filepath))
+        except Exception as error:
+            self.logger.error(f"Error processing voice message: {error}")
 
-                def download():
-                    file_info = self.bot.get_file(message.voice.file_id)
-                    if not file_info.file_path:
-                        raise ValueError("No file path")
-                    return self.bot.download_file(file_info.file_path)
+    def _message_allowed(self, message):
+        return bool(
+            self._get_bot_id() is not None
+            and str(message.chat.id) == self.chat_id
+            and message.from_user
+            and message.from_user.id != self._bot_id
+            and (self.topic_id is None or message.message_thread_id == self.topic_id)
+            and message.voice
+            and message.voice.file_id
+        )
 
-                data = robust_telegram_call(download, self.logger)
-                if data:
-                    with open(filepath, "wb") as f:
-                        f.write(data)
-                    self.logger.info(f"Downloaded voice message: {filepath}")
-                    self.bus.publish(
-                        TelegramVoiceMessageDownloadedEvent(filepath=filepath)
-                    )
+    def _get_bot_id(self):
+        if self._bot_id is None:
+            self._bot_id = getattr(self.call(self.bot.get_me, BOT_ID_RETRY), "id", None)
+        return self._bot_id
 
-            except Exception as e:
-                self.logger.error(f"Error processing voice message: {e}")
+    def _download_voice(self, file_id):
+        def download():
+            file_info = self.bot.get_file(file_id)
+            if not file_info.file_path:
+                raise ValueError("No file path")
+            return self.bot.download_file(file_info.file_path)
+
+        return self.call(download, DOWNLOAD_RETRY)
+
+    @staticmethod
+    def _save_voice(filepath, data):
+        partial = f"{filepath}.part"
+        with open(partial, "wb") as file:
+            file.write(data)
+        os.replace(partial, filepath)
 
 
-class VoiceMessageUploadWorker(Worker):
+class VoiceMessageUploadWorker(TelegramWorker):
     def __init__(self, bus, bot, chat_id, topic_id):
-        super().__init__(bus)
-        self.bot = bot
-        self.chat_id = chat_id
-        self.topic_id = topic_id
+        super().__init__(bus, bot, chat_id, topic_id)
+        self.max_upload_attempts = 5
+        self.upload_retry_delay = 30
+        self._retry_counts = {}
         self.bus.subscribe(RxRecordingCompleteEvent, self.queue_event)
 
     def handle_event(self, event):
         self.logger.info(f"Uploading: {event.filepath}")
         try:
-            robust_telegram_call(
-                lambda: self.bot.send_voice(
-                    chat_id=self.chat_id,
-                    voice=open(event.filepath, "rb"),
-                    message_thread_id=self.topic_id if self.topic_id != 0 else None,
-                    timeout=30,
-                ),
-                self.logger,
-                max_retries=5,
-                base_delay=3,
-            )
+            result = self.call(lambda: self._send_voice(event.filepath), UPLOAD_RETRY)
+            if self._stop_event.is_set() and result is None:
+                return
             self.logger.info(f"Uploaded: {event.filepath}")
+            self._retry_counts.pop(event.filepath, None)
         except FileNotFoundError:
             self.logger.warning(f"File not found: {event.filepath}")
             return
-        except Exception as e:
-            self.logger.error(f"Upload failed: {e}")
+        except Exception as error:
+            if is_retryable_telegram_error(error) and self._retry_upload_later(event, error):
+                return
+            self.logger.error(f"Upload failed: {error}")
+        self._remove_file(event.filepath)
+
+    def _send_voice(self, filepath):
+        with open(filepath, "rb") as voice:
+            return self.bot.send_voice(
+                chat_id=self.chat_id,
+                voice=voice,
+                message_thread_id=self.api_topic_id,
+                timeout=30,
+            )
+
+    def _retry_upload_later(self, event, error):
+        attempts = self._retry_counts.get(event.filepath, 0) + 1
+        self._retry_counts[event.filepath] = attempts
+        if attempts >= self.max_upload_attempts:
+            self.logger.error(f"Upload retries exhausted for {event.filepath}: {error}")
+            self._retry_counts.pop(event.filepath, None)
+            return False
+
+        self.logger.warning(
+            f"Upload network failure, retrying {event.filepath} later "
+            f"({attempts}/{self.max_upload_attempts}): {error}"
+        )
+        timer = threading.Timer(self.upload_retry_delay, self.queue_event, [event])
+        timer.daemon = True
+        timer.start()
+        return True
+
+    @staticmethod
+    def _remove_file(filepath):
         try:
-            os.remove(event.filepath)
-        except Exception:
+            os.remove(filepath)
+        except OSError:
             pass
 
     def start(self):
-        threading.Thread(
-            target=self.process_queue,
-            daemon=True,
-            name=f"{self.__class__.__name__}Queue",
-        ).start()
+        _start_daemon(self.process_queue, f"{self.__class__.__name__}Queue")
 
 
-class TelegramBotPollingWorker(Worker):
+class TelegramBotPollingWorker(TelegramWorker):
     def __init__(self, bus, bot):
-        super().__init__(bus)
-        self.bot = bot
+        super().__init__(bus, bot)
         self._consecutive_failures = 0
         self._max_failures = 10
+        self._last_update_id = None
+        self.poll_timeout = 10
+        self.long_polling_timeout = 5
+        self.backoff_base = 2
+        self.backoff_max = 60
+        self._thread = None
 
-    def _is_network_error(self, exception):
-        if isinstance(exception, ApiTelegramException):
-            return exception.error_code in [429, 502, 503, 504]
-        return isinstance(exception, (ConnectionError, TimeoutError, OSError))
+    def _is_network_error(self, error):
+        return is_retryable_telegram_error(error)
+
+    def _skip_pending_updates(self):
+        try:
+            updates = self.bot.get_updates(
+                offset=-1,
+                limit=1,
+                timeout=0,
+                allowed_updates=["message"],
+                long_polling_timeout=0,
+            )
+            if updates:
+                self._last_update_id = max(update.update_id for update in updates)
+                self.logger.info(
+                    f"Skipped pending Telegram updates through {self._last_update_id}"
+                )
+        except Exception as error:
+            self.logger.warning(f"Could not skip pending Telegram updates: {error}")
 
     def _polling_loop(self):
+        self._skip_pending_updates()
         while not self._stop_event.is_set():
             try:
-                self.logger.info("Starting Telegram polling...")
+                self._poll_once()
                 self._consecutive_failures = 0
-                self.bot.infinity_polling(
-                    timeout=10,
-                    long_polling_timeout=5,
-                    skip_pending=True,
-                    allowed_updates=["message"],
-                )
-            except Exception as e:
-                self._consecutive_failures += 1
-                if self._consecutive_failures >= self._max_failures:
-                    self.logger.error(f"Too many failures ({self._max_failures})")
-                    break
-                delay = min(5 * (2 ** min(self._consecutive_failures - 1, 5)), 60)
-                if self._is_network_error(e):
-                    self.logger.warning(
-                        f"Network error #{self._consecutive_failures}: {e}"
-                    )
-                else:
-                    self.logger.error(
-                        f"Polling error #{self._consecutive_failures}: {e}"
-                    )
-                if self._stop_event.wait(timeout=delay):
+            except Exception as error:
+                if self._handle_polling_error(error):
                     break
 
-    def start(self):
-        threading.Thread(
-            target=self._polling_loop, daemon=True, name="TelegramPolling"
-        ).start()
+    def _poll_once(self):
+        updates = self.bot.get_updates(
+            offset=None if self._last_update_id is None else self._last_update_id + 1,
+            timeout=self.poll_timeout,
+            long_polling_timeout=self.long_polling_timeout,
+            allowed_updates=["message"],
+        )
+        if not updates:
+            return
+        try:
+            self.bot.process_new_updates(updates)
+        except Exception as error:
+            self.logger.error(f"Error dispatching Telegram updates: {error}")
+        self._last_update_id = max(update.update_id for update in updates)
 
-    def stop(self):
+    def _handle_polling_error(self, error):
+        self._consecutive_failures += 1
+        log = self.logger.warning if self._is_network_error(error) else self.logger.error
+        log(f"Polling error #{self._consecutive_failures}: {error}")
+        if self._consecutive_failures >= self._max_failures:
+            self.logger.error(
+                f"Telegram polling reached {self._consecutive_failures} "
+                "consecutive failures; resetting polling session"
+            )
+            self._reset_telegram_session()
+            self._consecutive_failures = 0
+        return self._stop_event.wait(self._polling_backoff())
+
+    def _polling_backoff(self):
+        return min(
+            self.backoff_base * (2 ** min(self._consecutive_failures - 1, 5)),
+            self.backoff_max,
+        )
+
+    def _reset_telegram_session(self):
         try:
             self.bot.stop_polling()
         except Exception:
             pass
+
+    def start(self):
+        if not (self._thread and self._thread.is_alive()):
+            self._thread = _start_daemon(self._polling_loop, "TelegramPolling")
+
+    def stop(self):
+        self._reset_telegram_session()
         super().stop()

@@ -139,8 +139,11 @@ class TestErrorResilience:
             worker._set_max_volume()
 
     def test_ffplay_timeout_terminates_process(self, worker):
-        proc = MagicMock()
-        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="ffplay", timeout=30)
-        with patch("radiotelegram.tx.subprocess.Popen", return_value=proc):
+        ffmpeg = MagicMock()
+        aplay = MagicMock()
+        aplay.wait.side_effect = subprocess.TimeoutExpired(cmd="aplay", timeout=30)
+        aplay.stderr.read.return_value = b""
+        with patch("radiotelegram.tx.subprocess.Popen", side_effect=[ffmpeg, aplay]):
             worker._play_audio_file("/tmp/test.ogg")
-        proc.terminate.assert_called_once()
+        aplay.terminate.assert_called_once()
+        ffmpeg.terminate.assert_called_once()
