@@ -35,6 +35,99 @@ from radiotelegram.events import (
 from radiotelegram.rx_worker import EnhancedRxListenWorker
 
 
+# ── Detection configuration ─────────────────────────────────────
+
+
+class TestDetectionConfig:
+    @pytest.fixture(autouse=True)
+    def clear_detection_env(self, monkeypatch):
+        for name in (
+            "VAD_THRESHOLD",
+            "VAD_MIN_VOICE_RATIO",
+            "VAD_MIN_MAX_PROBABILITY",
+            "VAD_MIN_AVG_PROBABILITY",
+            "VAD_MIN_ANALYSIS_DURATION",
+            "SQUELCH_OPEN_THRESHOLD",
+            "SQUELCH_CLOSE_THRESHOLD",
+            "SQUELCH_MIN_ABSOLUTE_LEVEL_DB",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_defaults_preserve_detection_settings(self, _patch_hw):
+        worker = EnhancedRxListenWorker(MagicMock())
+        assert worker.squelch.open_threshold == 0.65
+        assert worker.squelch.close_threshold == 0.55
+        assert worker.squelch.min_absolute_level == -40.0
+        _patch_hw[2].assert_called_once_with(hop_size=256, threshold=0.5)
+        _patch_hw[1].assert_called_once_with(
+            48000,
+            threshold=0.5,
+            min_voice_ratio=0.01,
+            min_max_probability=0.55,
+            min_avg_probability=0.2,
+            min_analysis_duration=0.5,
+        )
+
+    def test_env_tunes_both_detectors_and_live_hysteresis(self, monkeypatch, _patch_hw):
+        for name, value in {
+            "VAD_THRESHOLD": "0.4",
+            "VAD_MIN_VOICE_RATIO": "0.02",
+            "VAD_MIN_MAX_PROBABILITY": "0.6",
+            "VAD_MIN_AVG_PROBABILITY": "0.3",
+            "VAD_MIN_ANALYSIS_DURATION": "0.75",
+            "SQUELCH_OPEN_THRESHOLD": "0.58",
+            "SQUELCH_CLOSE_THRESHOLD": "0.48",
+            "SQUELCH_MIN_ABSOLUTE_LEVEL_DB": "-45",
+        }.items():
+            monkeypatch.setenv(name, value)
+        worker = EnhancedRxListenWorker(MagicMock())
+        _patch_hw[2].assert_called_once_with(hop_size=256, threshold=0.4)
+        _patch_hw[1].assert_called_once_with(
+            48000,
+            threshold=0.4,
+            min_voice_ratio=0.02,
+            min_max_probability=0.6,
+            min_avg_probability=0.3,
+            min_analysis_duration=0.75,
+        )
+
+        audio = np.full(768, 1000, dtype=np.int16)
+        worker.squelch._vad.process.return_value = (0.2, 0)
+        assert worker.squelch.process(audio)[0] is True  # score 0.6 opens
+        worker.squelch._vad.process.return_value = (0.0, 0)
+        assert worker.squelch.process(audio)[0] is True  # score 0.5 stays open
+        is_open, stats = worker.squelch.process(np.full(768, 100, dtype=np.int16))
+        assert is_open is False  # audio below configured level floor closes
+        assert stats["level_score"] == 0
+        assert stats["min_absolute_level"] == -45.0
+
+    @pytest.mark.parametrize(
+        "name,value",
+        [
+            ("VAD_THRESHOLD", "invalid"),
+            ("VAD_THRESHOLD", ""),
+            ("VAD_THRESHOLD", "nan"),
+            ("VAD_THRESHOLD", "1.1"),
+            ("VAD_MIN_VOICE_RATIO", "-0.1"),
+            ("VAD_MIN_MAX_PROBABILITY", "2"),
+            ("VAD_MIN_AVG_PROBABILITY", "inf"),
+            ("VAD_MIN_ANALYSIS_DURATION", "-1"),
+            ("VAD_MIN_ANALYSIS_DURATION", "inf"),
+            ("SQUELCH_OPEN_THRESHOLD", "-0.1"),
+            ("SQUELCH_CLOSE_THRESHOLD", "0.9"),
+            ("SQUELCH_MIN_ABSOLUTE_LEVEL_DB", "1"),
+            ("SQUELCH_MIN_ABSOLUTE_LEVEL_DB", "-inf"),
+        ],
+    )
+    def test_invalid_env_fails_before_audio_probe(
+        self, name, value, monkeypatch, _patch_hw
+    ):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match=name):
+            EnhancedRxListenWorker(MagicMock())
+        _patch_hw[0].assert_not_called()
+
+
 # ── TX/RX coordination ───────────────────────────────────────────
 
 

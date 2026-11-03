@@ -54,6 +54,32 @@ Components:
 1. copy `.env.example` to `.env`
 2. edit file: fill bot token, group id and topic id (if present).
 
+Voice detection and live squelch can be tuned with these optional environment
+variables in `.env` or the process environment. Defaults preserve the existing
+behavior; restart the application (or recreate the Docker container) after changes.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `VAD_THRESHOLD` | `0.5` | TEN-VAD probability cutoff for each frame's voice flag, used by both detectors. |
+| `VAD_MIN_VOICE_RATIO` | `0.01` | Minimum fraction of recorded frames flagged as voice. |
+| `VAD_MIN_MAX_PROBABILITY` | `0.55` | Minimum peak voice probability in a recording. |
+| `VAD_MIN_AVG_PROBABILITY` | `0.2` | Minimum average voice probability in a recording. |
+| `VAD_MIN_ANALYSIS_DURATION` | `0.5` | Minimum recording length to analyze, in seconds. |
+| `SQUELCH_OPEN_THRESHOLD` | `0.65` | Combined score required to start recording. |
+| `SQUELCH_CLOSE_THRESHOLD` | `0.55` | Combined score required to keep the squelch open. |
+| `SQUELCH_MIN_ABSOLUTE_LEVEL_DB` | `-40.0` | Audio level below which the squelch's level score is zero, in dBFS. |
+
+Lower thresholds increase sensitivity and can admit more noise. The live squelch
+uses an equal mix of audio-level score and VAD probability, so tune its open/close
+thresholds to capture quieter speech; `VAD_THRESHOLD` changes frame flags, not that
+combined score. A recording is sent only when its voice ratio, peak probability,
+and average probability all exceed their configured minima.
+
+Probabilities, ratios, and squelch scores must be between `0` and `1`, with
+`SQUELCH_CLOSE_THRESHOLD <= SQUELCH_OPEN_THRESHOLD`. The minimum analysis duration
+must be nonnegative, and the audio level must be at most `0` dBFS. All values must
+be finite numbers; invalid settings stop startup with the variable name.
+
 ## run with docker
 ```
 docker compose up

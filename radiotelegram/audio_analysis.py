@@ -37,16 +37,25 @@ class AdaptiveNoiseFloor:
 class AdvancedSquelch:
     """Level + TEN-VAD squelch with hysteresis."""
 
-    def __init__(self, sample_rate=48000, vad_hop_size=256):
+    def __init__(
+        self,
+        sample_rate=48000,
+        vad_hop_size=256,
+        *,
+        vad_threshold=0.5,
+        open_threshold=0.65,
+        close_threshold=0.55,
+        min_absolute_level=-40.0,
+    ):
         self.sample_rate = sample_rate
         self.noise_floor = AdaptiveNoiseFloor()
-        self.open_threshold = 0.65
-        self.close_threshold = 0.55
-        self.min_absolute_level = -40.0
+        self.open_threshold = open_threshold
+        self.close_threshold = close_threshold
+        self.min_absolute_level = min_absolute_level
         self.is_open = False
 
         # Real-time TEN-VAD (16 kHz internally)
-        self._vad = TenVad(hop_size=vad_hop_size, threshold=0.5)
+        self._vad = TenVad(hop_size=vad_hop_size, threshold=vad_threshold)
         self._vad_ratio = sample_rate // 16000
         self._vad_hop_samples = vad_hop_size * self._vad_ratio
         self._vad_buf = np.empty(0, dtype=np.int16)
