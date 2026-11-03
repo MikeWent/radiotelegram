@@ -5,7 +5,7 @@ import subprocess
 
 import numpy as np
 from scipy.io import wavfile
-from ten_vad import TenVad
+from radiotelegram.vad import TenVad
 
 _TEN_VAD_SAMPLE_RATE = 16000
 

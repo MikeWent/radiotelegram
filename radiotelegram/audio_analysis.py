@@ -1,7 +1,7 @@
 """Audio analysis: adaptive noise floor and squelch with TEN-VAD."""
 
 import numpy as np
-from ten_vad import TenVad
+from radiotelegram.vad import TenVad
 
 
 class AdaptiveNoiseFloor:

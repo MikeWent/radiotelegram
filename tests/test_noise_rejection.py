@@ -1,7 +1,7 @@
 """Behavior tests: every audio file in tests/noise/ must be rejected as non-voice.
 
 These are integration tests that run the real TEN-VAD model against recorded
-noise samples. They require ten_vad, scipy, and ffmpeg to be available
+noise samples. They require a TEN VAD backend, scipy, and ffmpeg to be available
 (i.e. run inside Docker).
 """
 
@@ -13,7 +13,7 @@ import pytest
 NOISE_DIR = os.path.join(os.path.dirname(__file__), "noise")
 NOISE_FILES = sorted(glob.glob(os.path.join(NOISE_DIR, "*")))
 
-ten_vad = pytest.importorskip("ten_vad", reason="ten_vad not installed (run in Docker)")
+pytest.importorskip("radiotelegram.vad", reason="TEN VAD backend unavailable (run in Docker)")
 
 from radiotelegram.voice_detection import VoiceDetector
 

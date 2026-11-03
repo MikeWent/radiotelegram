@@ -59,6 +59,13 @@ Components:
 docker compose up
 ```
 
+On Linux ARM64 (`aarch64`), the container automatically builds TEN VAD's official
+ONNX backend before starting the bridge. The image includes pinned, checksum-verified
+TEN VAD sources and ONNX Runtime 1.22.0, so startup requires no network access.
+The first start takes longer to compile; restarts reuse the compiled extension.
+Recreating the container rebuilds it. Linux x86_64 uses TEN VAD's packaged library.
+Backend build or model-loading failures stop startup and appear in the container logs.
+
 ## raspberry pi
 
 put these lines into `/boot/firmware/config.txt`

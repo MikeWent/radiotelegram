@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y \
     libc++1 \
     # Python build tools
     build-essential \
+    cmake \
+    curl \
+    ca-certificates \
     python3-dev \
     pkg-config \
     # Clean up
@@ -24,12 +27,16 @@ RUN apt-get update && apt-get install -y \
 # Install uv
 RUN pip install --no-cache-dir uv
 
+# Bundle ARM64 sources and runtime; compilation happens at container startup.
+COPY docker/prepare-ten-vad.sh /usr/local/bin/prepare-ten-vad
+RUN sh /usr/local/bin/prepare-ten-vad
+
+# Keep the project and its virtual environment together.
+WORKDIR /app
+
 # Copy project files and install Python dependencies
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen
-
-# Create app directory
-WORKDIR /app
+RUN uv sync --frozen --no-dev
 
 # Create directories for temporary files and recordings
 RUN mkdir -p /tmp/radiotelegram /app/recordings
@@ -39,10 +46,12 @@ COPY radiotelegram/ ./radiotelegram/
 COPY README.md ./
 
 # Set environment variables
-ENV PYTHONPATH=/app
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH=/app:/opt/ten-vad/build
 ENV PYTHONUNBUFFERED=1
 ENV AUDIO_DEVICE=hw:0,0
 ENV AUDIO_OUTPUT_DEVICE=hw:0,0
 
 # Default command
-CMD ["uv", "run", "python", "-m", "radiotelegram.main"]
+ENTRYPOINT ["python", "-m", "radiotelegram.docker_entrypoint"]
+CMD ["python", "-m", "radiotelegram.main"]
