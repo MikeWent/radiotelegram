@@ -80,6 +80,18 @@ Probabilities, ratios, and squelch scores must be between `0` and `1`, with
 must be nonnegative, and the audio level must be at most `0` dBFS. All values must
 be finite numbers; invalid settings stop startup with the variable name.
 
+The TX wake-up tone before each voice message is also configurable:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `TX_WAKE_TONE_FREQUENCY` | `1750` | Tone frequency in Hz, from `1` to `24000`. |
+| `TX_WAKE_TONE_DURATION` | `0.3` | Tone duration in seconds; `0` disables the tone and following delay. |
+| `TX_WAKE_TONE_DELAY` | `0.5` | Pause in seconds between the tone and voice playback. |
+
+Duration and delay must be finite, nonnegative numbers. These settings work in
+`.env` or the process environment, including Docker Compose, and take effect after
+restarting the application or recreating the container.
+
 ## run with docker
 ```
 docker compose up

@@ -1,3 +1,4 @@
+import math
 import os
 import subprocess
 import threading
@@ -5,6 +6,7 @@ import time
 from typing import Optional
 
 from radiotelegram.bus import MessageBus, Worker
+from radiotelegram.config import env_float
 from radiotelegram.events import (
     RxRecordingEndedEvent,
     RxRecordingStartedEvent,
@@ -32,8 +34,13 @@ class EnhancedTxPlayWorker(Worker):
 
         self.audio_output_device = audio_output_device
         self.timeout_seconds = 30
-        self.wake_tone_frequency = 1750
-        self.wake_tone_duration = 0.3
+        self.wake_tone_frequency = env_float(
+            "TX_WAKE_TONE_FREQUENCY", 1750, 1.0, 24000.0
+        )
+        self.wake_tone_duration = env_float(
+            "TX_WAKE_TONE_DURATION", 0.3, 0.0, math.inf
+        )
+        self.wake_tone_delay = env_float("TX_WAKE_TONE_DELAY", 0.5, 0.0, math.inf)
         self.post_tx_delay = 2.5
 
         self.target_lufs = -16
@@ -88,8 +95,9 @@ class EnhancedTxPlayWorker(Worker):
             return
 
         try:
-            self._play_wake_tone()
-            time.sleep(0.5)
+            if self.wake_tone_duration > 0:
+                self._play_wake_tone()
+                time.sleep(self.wake_tone_delay)
             self._play_audio_file(processed)
         finally:
             for f in [processed, filepath]:

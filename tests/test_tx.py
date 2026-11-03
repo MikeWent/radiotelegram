@@ -14,6 +14,7 @@ from radiotelegram.events import (
     TxMessagePlaybackEndedEvent,
     TxMessagePlaybackStartedEvent,
 )
+from radiotelegram.tx import EnhancedTxPlayWorker
 
 
 @pytest.fixture
@@ -29,9 +30,81 @@ def worker(bus):
         "radiotelegram.tx.subprocess.run",
         return_value=MagicMock(returncode=0, stdout=""),
     ):
-        from radiotelegram.tx import EnhancedTxPlayWorker
         w = EnhancedTxPlayWorker(bus)
     return w
+
+
+class TestWakeToneConfig:
+    @pytest.fixture(autouse=True)
+    def clear_wake_tone_env(self, monkeypatch):
+        for name in (
+            "TX_WAKE_TONE_FREQUENCY",
+            "TX_WAKE_TONE_DURATION",
+            "TX_WAKE_TONE_DELAY",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_defaults_preserve_wake_tone(self, worker):
+        assert worker.wake_tone_frequency == 1750
+        assert worker.wake_tone_duration == 0.3
+        assert worker.wake_tone_delay == 0.5
+
+    def test_env_controls_generated_tone_and_playback_delay(self, monkeypatch, bus):
+        monkeypatch.setenv("TX_WAKE_TONE_FREQUENCY", "1100")
+        monkeypatch.setenv("TX_WAKE_TONE_DURATION", "0.8")
+        monkeypatch.setenv("TX_WAKE_TONE_DELAY", "0.2")
+        worker = EnhancedTxPlayWorker(bus)
+        ffmpeg, aplay = MagicMock(), MagicMock()
+        with patch("radiotelegram.tx.subprocess.Popen", side_effect=[ffmpeg, aplay]) as popen:
+            worker._play_wake_tone()
+        assert "sine=frequency=1100.0:duration=0.8" in popen.call_args_list[0].args[0]
+        aplay.wait.assert_any_call(timeout=2.8)
+
+        with (
+            patch.object(worker, "_set_max_volume"),
+            patch.object(worker, "_preprocess_for_radio", return_value="/tmp/p.ogg"),
+            patch.object(worker, "_play_wake_tone") as tone,
+            patch.object(worker, "_play_audio_file") as play,
+            patch("radiotelegram.tx.time.sleep") as sleep,
+            patch("radiotelegram.tx.os.path.exists", return_value=False),
+        ):
+            worker.play_enhanced_audio("/tmp/v.ogg")
+        tone.assert_called_once()
+        sleep.assert_called_once_with(0.2)
+        play.assert_called_once_with("/tmp/p.ogg")
+
+    def test_zero_duration_skips_tone_and_delay(self, monkeypatch, bus):
+        monkeypatch.setenv("TX_WAKE_TONE_DURATION", "0")
+        worker = EnhancedTxPlayWorker(bus)
+        with (
+            patch.object(worker, "_set_max_volume"),
+            patch.object(worker, "_preprocess_for_radio", return_value="/tmp/p.ogg"),
+            patch("radiotelegram.tx.subprocess.Popen") as popen,
+            patch.object(worker, "_play_audio_file") as play,
+            patch("radiotelegram.tx.time.sleep") as sleep,
+            patch("radiotelegram.tx.os.path.exists", return_value=False),
+        ):
+            worker.play_enhanced_audio("/tmp/v.ogg")
+        popen.assert_not_called()
+        sleep.assert_not_called()
+        play.assert_called_once_with("/tmp/p.ogg")
+
+    @pytest.mark.parametrize(
+        "name,value",
+        [
+            ("TX_WAKE_TONE_FREQUENCY", "invalid"),
+            ("TX_WAKE_TONE_FREQUENCY", "0"),
+            ("TX_WAKE_TONE_FREQUENCY", "24001"),
+            ("TX_WAKE_TONE_DURATION", "-0.1"),
+            ("TX_WAKE_TONE_DURATION", "inf"),
+            ("TX_WAKE_TONE_DELAY", "-1"),
+            ("TX_WAKE_TONE_DELAY", "nan"),
+        ],
+    )
+    def test_invalid_env_fails_at_startup(self, name, value, monkeypatch, bus):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match=name):
+            EnhancedTxPlayWorker(bus)
 
 
 class TestTxRxMutualExclusion:

@@ -13,6 +13,7 @@ from scipy.io import wavfile
 
 from radiotelegram.audio_analysis import AdvancedSquelch
 from radiotelegram.bus import MessageBus, Worker
+from radiotelegram.config import env_float
 from radiotelegram.events import (
     RxAudioStatsEvent,
     RxRecordingCompleteEvent,
@@ -22,16 +23,6 @@ from radiotelegram.events import (
     TxMessagePlaybackStartedEvent,
 )
 from radiotelegram.voice_detection import VoiceDetector
-
-
-def _env_float(name, default, minimum=0.0, maximum=1.0):
-    try:
-        value = float(os.getenv(name, str(default)))
-    except ValueError:
-        raise ValueError(f"{name} must be a number") from None
-    if not math.isfinite(value) or not minimum <= value <= maximum:
-        raise ValueError(f"{name} must be finite and between {minimum} and {maximum}")
-    return value
 
 
 class EnhancedRxListenWorker(Worker):
@@ -70,9 +61,9 @@ class EnhancedRxListenWorker(Worker):
         self.pre_record_filepath = None
 
         # Processing
-        vad_threshold = _env_float("VAD_THRESHOLD", 0.5)
-        open_threshold = _env_float("SQUELCH_OPEN_THRESHOLD", 0.65)
-        close_threshold = _env_float("SQUELCH_CLOSE_THRESHOLD", 0.55)
+        vad_threshold = env_float("VAD_THRESHOLD", 0.5)
+        open_threshold = env_float("SQUELCH_OPEN_THRESHOLD", 0.65)
+        close_threshold = env_float("SQUELCH_CLOSE_THRESHOLD", 0.55)
         if close_threshold > open_threshold:
             raise ValueError(
                 "SQUELCH_CLOSE_THRESHOLD must be <= SQUELCH_OPEN_THRESHOLD"
@@ -82,17 +73,17 @@ class EnhancedRxListenWorker(Worker):
             vad_threshold=vad_threshold,
             open_threshold=open_threshold,
             close_threshold=close_threshold,
-            min_absolute_level=_env_float(
+            min_absolute_level=env_float(
                 "SQUELCH_MIN_ABSOLUTE_LEVEL_DB", -40.0, -math.inf, 0.0
             ),
         )
         self.voice_detector = VoiceDetector(
             sample_rate,
             threshold=vad_threshold,
-            min_voice_ratio=_env_float("VAD_MIN_VOICE_RATIO", 0.01),
-            min_max_probability=_env_float("VAD_MIN_MAX_PROBABILITY", 0.55),
-            min_avg_probability=_env_float("VAD_MIN_AVG_PROBABILITY", 0.2),
-            min_analysis_duration=_env_float(
+            min_voice_ratio=env_float("VAD_MIN_VOICE_RATIO", 0.01),
+            min_max_probability=env_float("VAD_MIN_MAX_PROBABILITY", 0.55),
+            min_avg_probability=env_float("VAD_MIN_AVG_PROBABILITY", 0.2),
+            min_analysis_duration=env_float(
                 "VAD_MIN_ANALYSIS_DURATION", 0.5, 0.0, math.inf
             ),
         )
