@@ -25,3 +25,6 @@ tar -xzf onnxruntime.tgz --strip-components=1 -C onnxruntime
 # Upstream uses a model path relative to cwd. Make it independent of WORKDIR.
 sed -i 's|"onnx_model/ten-vad.onnx"|"/opt/ten-vad/source/src/onnx_model/ten-vad.onnx"|' source/src/aed.cc
 rm source.tar.gz onnxruntime.tgz
+
+# Invalidate the persistent build cache when pinned inputs or patches change.
+sha256sum "$0" > build-inputs.sha256

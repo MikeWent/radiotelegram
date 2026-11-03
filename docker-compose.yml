@@ -40,6 +40,7 @@ services:
     
     # Volume mounts for ALSA configuration
     volumes:
+      - ten-vad-build:/opt/ten-vad/build
       - /usr/share/alsa:/usr/share/alsa:ro
       - /etc/asound.conf:/etc/asound.conf:ro
     
@@ -49,3 +50,6 @@ services:
     cap_add:
       - SYS_NICE  # For audio priority
       - SYS_ADMIN  # For device management
+
+volumes:
+  ten-vad-build:
