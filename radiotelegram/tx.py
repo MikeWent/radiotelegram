@@ -38,9 +38,9 @@ class EnhancedTxPlayWorker(Worker):
             "TX_WAKE_TONE_FREQUENCY", 1750, 1.0, 24000.0
         )
         self.wake_tone_duration = env_float(
-            "TX_WAKE_TONE_DURATION", 0.3, 0.0, math.inf
+            "TX_WAKE_TONE_DURATION", 2.0, 0.0, math.inf
         )
-        self.wake_tone_delay = env_float("TX_WAKE_TONE_DELAY", 0.5, 0.0, math.inf)
+        self.wake_tone_delay = env_float("TX_WAKE_TONE_DELAY", 0.0, 0.0, math.inf)
         self.post_tx_delay = 2.5
 
         self.target_lufs = -16
@@ -95,9 +95,6 @@ class EnhancedTxPlayWorker(Worker):
             return
 
         try:
-            if self.wake_tone_duration > 0:
-                self._play_wake_tone()
-                time.sleep(self.wake_tone_delay)
             self._play_audio_file(processed)
         finally:
             for f in [processed, filepath]:
@@ -166,69 +163,23 @@ class EnhancedTxPlayWorker(Worker):
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
             pass
 
-    def _play_wake_tone(self):
-        try:
-            ffmpeg = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    f"sine=frequency={self.wake_tone_frequency}:"
-                    f"duration={self.wake_tone_duration}",
-                    "-f",
-                    "s16le",
-                    "-ar",
-                    "48000",
-                    "-ac",
-                    "1",
-                    "pipe:1",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            aplay = subprocess.Popen(
-                [
-                    "aplay",
-                    "-D",
-                    self._aplay_device,
-                    "-f",
-                    "S16_LE",
-                    "-r",
-                    "48000",
-                    "-c",
-                    "1",
-                ],
-                stdin=ffmpeg.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            ffmpeg.stdout.close()
-            try:
-                aplay.wait(timeout=self.wake_tone_duration + 2.0)
-                ffmpeg.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                aplay.terminate()
-                ffmpeg.terminate()
-            finally:
-                for p in (aplay, ffmpeg):
-                    for s in (p.stdin, p.stdout, p.stderr):
-                        if s:
-                            try:
-                                s.close()
-                            except Exception:
-                                pass
-                    try:
-                        p.kill()
-                        p.wait(timeout=1.0)
-                    except Exception:
-                        pass
-        except Exception as e:
-            self.logger.error(f"Wake tone error: {e}")
-
     def _play_audio_file(self, filepath):
+        filters = ["-af", "volume=0.8"]
+        preamble_duration = 0.0
+        if self.wake_tone_duration > 0:
+            # Keep the device open from the VOX trigger through the first word.
+            preamble_duration = self.wake_tone_duration + self.wake_tone_delay
+            filters = [
+                "-filter_complex",
+                f"sine=frequency={self.wake_tone_frequency}:"
+                f"sample_rate=48000:duration={self.wake_tone_duration},"
+                f"apad=pad_dur={self.wake_tone_delay}[wake];"
+                "[0:a]aformat=sample_rates=48000:channel_layouts=mono,"
+                "asetpts=PTS-STARTPTS[voice];"
+                "[wake][voice]concat=n=2:v=0:a=1,volume=0.8[a]",
+                "-map",
+                "[a]",
+            ]
         try:
             ffmpeg = subprocess.Popen(
                 [
@@ -237,8 +188,7 @@ class EnhancedTxPlayWorker(Worker):
                     "error",
                     "-i",
                     filepath,
-                    "-af",
-                    "volume=0.8",
+                    *filters,
                     "-f",
                     "s16le",
                     "-ar",
@@ -268,7 +218,7 @@ class EnhancedTxPlayWorker(Worker):
             )
             ffmpeg.stdout.close()
             try:
-                aplay.wait(timeout=self.timeout_seconds)
+                aplay.wait(timeout=self.timeout_seconds + preamble_duration)
                 ffmpeg.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 aplay.terminate()
